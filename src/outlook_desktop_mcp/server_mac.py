@@ -78,6 +78,43 @@ def _clean(value: str) -> str:
     return "" if v == "missing value" else v
 
 
+def _recipient_lines(addresses: str, kind: str) -> str:
+    """Build AppleScript `make new <kind> ...` lines from a semicolon-separated
+    list of email addresses, attaching each to the message named `newMsg`."""
+    lines = ""
+    for addr in addresses.split(";"):
+        addr = addr.strip()
+        if addr:
+            lines += (
+                f'make new {kind} at newMsg with properties '
+                f'{{email address:{{address:"{escape(addr)}"}}}}\n'
+            )
+    return lines
+
+
+def _attachment_lines(paths: list[str] | None, target: str) -> str:
+    """Build AppleScript lines that attach local files to `target`.
+
+    Each path must be an existing absolute file. Raises FileNotFoundError with
+    a descriptive message if any path is missing, so the caller can surface a
+    clean error before running the script.
+    """
+    if not paths:
+        return ""
+    lines = ""
+    for path in paths:
+        path = path.strip()
+        if not path:
+            continue
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Attachment not found: {path}")
+        lines += (
+            f'make new attachment at {target} with properties '
+            f'{{file:POSIX file "{escape(path)}"}}\n'
+        )
+    return lines
+
+
 # --- UI Scraping for New Outlook for Mac ---
 # New Outlook for Mac stores Exchange/M365 mailbox data in the cloud and
 # does NOT expose it through the AppleScript `inbox` keyword (which only
@@ -225,6 +262,7 @@ async def send_email(
     cc: str = "",
     bcc: str = "",
     html_body: str = "",
+    attachments: list[str] | None = None,
 ) -> str:
     """Send an email using the user's Outlook account.
 
@@ -241,28 +279,25 @@ async def send_email(
         bcc: Optional. BCC recipients, separated by semicolons.
         html_body: Optional. HTML-formatted body. When provided, Outlook renders
             the email as HTML. The plain-text body serves as fallback.
+        attachments: Optional. A list of absolute file paths to attach.
 
     Returns:
         A confirmation message with subject and recipients, or an error.
     """
-    # Build recipient lines
-    def _recipient_lines(addresses: str, kind: str) -> str:
-        lines = ""
-        for addr in addresses.split(";"):
-            addr = addr.strip()
-            if addr:
-                lines += f'make new {kind} at newMsg with properties {{email address:{{address:"{escape(addr)}"}}}}\n'
-        return lines
-
     to_lines = _recipient_lines(to, "to recipient")
     cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
     bcc_lines = _recipient_lines(bcc, "bcc recipient") if bcc else ""
+
+    try:
+        att_lines = _attachment_lines(attachments, "newMsg")
+    except FileNotFoundError as e:
+        return json.dumps({"error": str(e)})
 
     content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
 
     script = f'''tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
-    {to_lines}{cc_lines}{bcc_lines}
+    {to_lines}{cc_lines}{bcc_lines}{att_lines}
     send newMsg
 end tell'''
 
@@ -271,6 +306,69 @@ end tell'''
         return f"Email sent: '{subject}' to {to}"
     except Exception as e:
         return f"Error sending email: {e}"
+
+
+# =====================================================================
+# TOOL: create_draft
+# =====================================================================
+
+@mcp.tool()
+async def create_draft(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    html_body: str = "",
+    attachments: list[str] | None = None,
+) -> str:
+    """Create an email draft without sending it.
+
+    Builds the message and saves it to the Drafts folder so it can be
+    reviewed and sent manually later. Useful when a human should approve
+    the message before it goes out.
+
+    Args:
+        to: One or more recipient email addresses, separated by semicolons.
+        subject: The email subject line.
+        body: The plain-text body of the email.
+        cc: Optional. CC recipients, separated by semicolons.
+        bcc: Optional. BCC recipients, separated by semicolons.
+        html_body: Optional. HTML-formatted body.
+        attachments: Optional. A list of absolute file paths to attach.
+
+    Returns:
+        JSON with the draft's entry_id and subject, or an error.
+    """
+    to_lines = _recipient_lines(to, "to recipient")
+    cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
+    bcc_lines = _recipient_lines(bcc, "bcc recipient") if bcc else ""
+
+    try:
+        att_lines = _attachment_lines(attachments, "newMsg")
+    except FileNotFoundError as e:
+        return json.dumps({"error": str(e)})
+
+    content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
+
+    script = f'''tell application "Microsoft Outlook"
+    set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
+    {to_lines}{cc_lines}{bcc_lines}{att_lines}
+    save newMsg
+    return (id of newMsg as text) & "{DELIM}" & (subject of newMsg)
+end tell'''
+
+    try:
+        raw = await bridge.run(script)
+        parts = raw.split(DELIM)
+        result = {
+            "status": "draft_created",
+            "entry_id": parts[0].strip() if len(parts) > 0 else "",
+            "subject": parts[1].strip() if len(parts) > 1 else subject,
+        }
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return f"Error creating draft: {e}"
 
 
 # =====================================================================
@@ -626,6 +724,7 @@ async def reply_email(
     entry_id: str,
     body: str,
     reply_all: bool = False,
+    attachments: list[str] | None = None,
 ) -> str:
     """Reply to an email in Outlook.
 
@@ -638,17 +737,23 @@ async def reply_email(
             in the email thread.
         reply_all: If true, reply to all recipients (sender + all CC/To).
             If false (default), reply only to the sender.
+        attachments: Optional. A list of absolute file paths to attach.
 
     Returns:
         Confirmation indicating the reply was sent, or an error.
     """
+    try:
+        att_lines = _attachment_lines(attachments, "replyMsg")
+    except FileNotFoundError as e:
+        return json.dumps({"error": str(e)})
+
     reply_cmd = "reply all to" if reply_all else "reply to"
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set msubject to subject of m
     set replyMsg to {reply_cmd} m
     set content of replyMsg to "{escape(body)}" & return & return & content of replyMsg
-    send replyMsg
+    {att_lines}send replyMsg
     return msubject
 end tell'''
 
@@ -657,6 +762,63 @@ end tell'''
         return f"Reply sent to '{subject}' (reply_all={reply_all})"
     except Exception as e:
         return f"Error replying to email: {e}"
+
+
+# =====================================================================
+# TOOL: forward_email
+# =====================================================================
+
+@mcp.tool()
+async def forward_email(
+    entry_id: str,
+    to: str,
+    comment: str = "",
+    cc: str = "",
+    attachments: list[str] | None = None,
+) -> str:
+    """Forward an email to one or more recipients.
+
+    Forwards the original message (including its existing attachments) and
+    optionally prepends a comment above the forwarded content.
+
+    Args:
+        entry_id: The numeric ID of the email to forward.
+        to: One or more recipient email addresses, separated by semicolons.
+        comment: Optional. Text to prepend above the forwarded message.
+        cc: Optional. CC recipients, separated by semicolons.
+        attachments: Optional. Additional absolute file paths to attach.
+
+    Returns:
+        Confirmation indicating the message was forwarded, or an error.
+    """
+    to_lines = _recipient_lines(to, "to recipient")
+    cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
+
+    try:
+        att_lines = _attachment_lines(attachments, "fwdMsg")
+    except FileNotFoundError as e:
+        return json.dumps({"error": str(e)})
+
+    comment_line = ""
+    if comment:
+        comment_line = (
+            f'set content of fwdMsg to "{escape(comment)}" & return & return '
+            f'& content of fwdMsg\n'
+        )
+
+    script = f'''tell application "Microsoft Outlook"
+    set m to message id {entry_id}
+    set msubject to subject of m
+    set fwdMsg to forward m
+    {to_lines}{cc_lines}{comment_line}{att_lines}send fwdMsg
+    return msubject
+end tell'''
+
+    try:
+        subject = await bridge.run(script)
+        return f"Email forwarded: '{subject}' to {to}"
+    except Exception as e:
+        return f"Error forwarding email: {e}"
 
 
 # =====================================================================

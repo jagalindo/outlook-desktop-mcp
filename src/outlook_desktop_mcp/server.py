@@ -82,6 +82,24 @@ def _check_item_class(item, expected_class: int, label: str) -> str | None:
     return None
 
 
+def _add_attachments(item, paths: list[str] | None) -> None:
+    """Attach local files to a mail item via COM.
+
+    Each path must be an existing absolute file. Raises FileNotFoundError with
+    a descriptive message if any path is missing, so the caller can surface a
+    clean error before sending/saving.
+    """
+    if not paths:
+        return
+    for path in paths:
+        path = path.strip()
+        if not path:
+            continue
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Attachment not found: {path}")
+        item.Attachments.Add(path)
+
+
 # --- MCP Server ---
 
 mcp = FastMCP(
@@ -256,6 +274,7 @@ async def send_email(
     cc: str = "",
     bcc: str = "",
     html_body: str = "",
+    attachments: list[str] | None = None,
     account: str = "",
 ) -> str:
     """Send an email using the user's Outlook account.
@@ -273,13 +292,14 @@ async def send_email(
         bcc: Optional. BCC recipients, separated by semicolons.
         html_body: Optional. HTML-formatted body. When provided, Outlook renders
             the email as HTML. The plain-text body serves as fallback.
+        attachments: Optional. A list of absolute file paths to attach.
         account: Optional. Account display name (or substring) to send from.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         A confirmation message with subject and recipients, or an error.
     """
-    def _send(outlook, namespace, to, subject, body, cc, bcc, html_body, account):
+    def _send(outlook, namespace, to, subject, body, cc, bcc, html_body, attachments, account):
         store = _require_store(namespace, account)
         mail = outlook.CreateItem(OL_MAIL_ITEM)
         # Set the sending account
@@ -296,13 +316,84 @@ async def send_email(
             mail.BCC = bcc
         if html_body:
             mail.HTMLBody = html_body
+        try:
+            _add_attachments(mail, attachments)
+        except FileNotFoundError as e:
+            return json.dumps({"error": str(e)})
         mail.Send()
         return f"Email sent: '{subject}' to {to}"
 
     try:
-        return await bridge.call(_send, to, subject, body, cc, bcc, html_body, account)
+        return await bridge.call(_send, to, subject, body, cc, bcc, html_body, attachments, account)
     except Exception as e:
         return f"Error sending email: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: create_draft
+# =====================================================================
+
+@mcp.tool()
+async def create_draft(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    html_body: str = "",
+    attachments: list[str] | None = None,
+    account: str = "",
+) -> str:
+    """Create an email draft without sending it.
+
+    Builds the message and saves it to the Drafts folder so it can be
+    reviewed and sent manually later. Useful when a human should approve
+    the message before it goes out.
+
+    Args:
+        to: One or more recipient email addresses, separated by semicolons.
+        subject: The email subject line.
+        body: The plain-text body of the email.
+        cc: Optional. CC recipients, separated by semicolons.
+        bcc: Optional. BCC recipients, separated by semicolons.
+        html_body: Optional. HTML-formatted body.
+        attachments: Optional. A list of absolute file paths to attach.
+        account: Optional. Account display name (or substring) to draft from.
+
+    Returns:
+        JSON with the draft's entry_id and subject, or an error.
+    """
+    def _draft(outlook, namespace, to, subject, body, cc, bcc, html_body, attachments, account):
+        store = _require_store(namespace, account)
+        mail = outlook.CreateItem(OL_MAIL_ITEM)
+        for acc in outlook.Session.Accounts:
+            if acc.DeliveryStore.StoreID == store.StoreID:
+                mail._oleobj_.Invoke(*(64209, 0, 8, 0, acc))  # SendUsingAccount
+                break
+        mail.To = to
+        mail.Subject = subject
+        mail.Body = body
+        if cc:
+            mail.CC = cc
+        if bcc:
+            mail.BCC = bcc
+        if html_body:
+            mail.HTMLBody = html_body
+        try:
+            _add_attachments(mail, attachments)
+        except FileNotFoundError as e:
+            return json.dumps({"error": str(e)})
+        mail.Save()
+        return json.dumps({
+            "status": "draft_created",
+            "entry_id": mail.EntryID,
+            "subject": mail.Subject,
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_draft, to, subject, body, cc, bcc, html_body, attachments, account)
+    except Exception as e:
+        return f"Error creating draft: {format_com_error(e)}"
 
 
 # =====================================================================
@@ -582,6 +673,7 @@ async def reply_email(
     entry_id: str,
     body: str,
     reply_all: bool = False,
+    attachments: list[str] | None = None,
     account: str = "",
 ) -> str:
     """Reply to an email in Outlook.
@@ -595,13 +687,14 @@ async def reply_email(
             in the email thread.
         reply_all: If true, reply to all recipients (sender + all CC/To).
             If false (default), reply only to the sender.
+        attachments: Optional. A list of absolute file paths to attach.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
 
     Returns:
         Confirmation indicating the reply was sent, or an error.
     """
-    def _reply(outlook, namespace, entry_id, body, reply_all, account):
+    def _reply(outlook, namespace, entry_id, body, reply_all, attachments, account):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -612,13 +705,75 @@ async def reply_email(
         subject = item.Subject
         reply_item = item.ReplyAll() if reply_all else item.Reply()
         reply_item.Body = body + "\n\n" + reply_item.Body
+        try:
+            _add_attachments(reply_item, attachments)
+        except FileNotFoundError as e:
+            return json.dumps({"error": str(e)})
         reply_item.Send()
         return f"Reply sent to '{subject}' (reply_all={reply_all})"
 
     try:
-        return await bridge.call(_reply, entry_id, body, reply_all, account)
+        return await bridge.call(_reply, entry_id, body, reply_all, attachments, account)
     except Exception as e:
         return f"Error replying to email: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: forward_email
+# =====================================================================
+
+@mcp.tool()
+async def forward_email(
+    entry_id: str,
+    to: str,
+    comment: str = "",
+    cc: str = "",
+    attachments: list[str] | None = None,
+    account: str = "",
+) -> str:
+    """Forward an email to one or more recipients.
+
+    Forwards the original message (including its existing attachments) and
+    optionally prepends a comment above the forwarded content.
+
+    Args:
+        entry_id: The unique Outlook EntryID of the email to forward.
+        to: One or more recipient email addresses, separated by semicolons.
+        comment: Optional. Text to prepend above the forwarded message.
+        cc: Optional. CC recipients, separated by semicolons.
+        attachments: Optional. Additional absolute file paths to attach.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        Confirmation indicating the message was forwarded, or an error.
+    """
+    def _forward(outlook, namespace, entry_id, to, comment, cc, attachments, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+        subject = item.Subject
+        fwd = item.Forward()
+        fwd.To = to
+        if cc:
+            fwd.CC = cc
+        if comment:
+            fwd.Body = comment + "\n\n" + fwd.Body
+        try:
+            _add_attachments(fwd, attachments)
+        except FileNotFoundError as e:
+            return json.dumps({"error": str(e)})
+        fwd.Send()
+        return f"Email forwarded: '{subject}' to {to}"
+
+    try:
+        return await bridge.call(_forward, entry_id, to, comment, cc, attachments, account)
+    except Exception as e:
+        return f"Error forwarding email: {format_com_error(e)}"
 
 
 # =====================================================================
