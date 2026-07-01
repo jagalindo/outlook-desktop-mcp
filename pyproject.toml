@@ -24,6 +24,11 @@ dependencies = [
     "mcp[cli]>=1.26.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8",
+]
+
 [project.urls]
 Homepage = "https://github.com/aaanerud/outlook-desktop-mcp"
 Repository = "https://github.com/aaanerud/outlook-desktop-mcp"
@@ -38,3 +43,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/outlook_desktop_mcp"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = [
+    "E501",  # long lines are mostly embedded AppleScript / docstrings
+]

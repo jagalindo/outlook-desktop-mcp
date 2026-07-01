@@ -38,8 +38,8 @@ When the server starts, it checks which operating system it is running on and ta
               ┌───────┴────────┐    ┌────────┴────────┐
               │  server.py     │    │  server_mac.py   │
               │  COM Bridge    │    │  AppleScript     │
-              │  (29 tools)    │    │  Bridge          │
-              │                │    │  (22 tools)      │
+              │  (34 tools)    │    │  Bridge          │
+              │                │    │  (30 tools)      │
               └───────┬────────┘    └────────┬─────────┘
                       |                      |
               OUTLOOK.EXE via         Microsoft Outlook
@@ -59,6 +59,8 @@ Mac Outlook does not support COM. Instead, it exposes an AppleScript dictionary 
 The server is structured as two parallel implementations with identical tool names and signatures, so MCP clients see the same interface regardless of platform. Tools that are not available on a given platform are simply not registered.
 
 ## Requirements
+
+Windows and macOS only — the server drives a locally running Outlook Desktop, so Linux is not supported.
 
 ### Windows
 
@@ -313,8 +315,8 @@ Windows-only examples:
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
     entrypoint.py            # Platform detection → routes to correct server
-    server.py                # Windows MCP server (29 tools, COM automation)
-    server_mac.py            # macOS MCP server (22 tools, AppleScript)
+    server.py                # Windows MCP server (34 tools, COM automation)
+    server_mac.py            # macOS MCP server (30 tools, AppleScript)
     com_bridge.py            # Async-to-COM threading bridge (Windows)
     applescript_bridge.py    # Async osascript execution (macOS)
     tools/
