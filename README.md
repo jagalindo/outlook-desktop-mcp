@@ -113,11 +113,13 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 
 | Tool | Windows | macOS | Description |
 |------|:-------:|:-----:|-------------|
-| `send_email` | yes | yes | Send an email with To/CC/BCC, plain text or HTML body |
+| `send_email` | yes | yes | Send an email with To/CC/BCC, plain text or HTML body, and file attachments |
+| `create_draft` | yes | yes | Compose an email and save it to Drafts without sending |
 | `list_emails` | yes | yes | List recent emails from any folder, with optional unread filter |
 | `read_email` | yes | yes | Read full email content by entry ID or subject search |
 | `search_emails` | yes | yes | Full-text search across email subjects and bodies |
-| `reply_email` | yes | yes | Reply or reply-all, preserving the conversation thread |
+| `reply_email` | yes | yes | Reply or reply-all, preserving the conversation thread, with attachments |
+| `forward_email` | yes | yes | Forward a message to new recipients with an optional comment |
 | `mark_as_read` | yes | yes | Mark a specific email as read |
 | `mark_as_unread` | yes | yes | Mark a specific email as unread |
 | `move_email` | yes | yes | Move an email to Archive, Trash, or any folder |
@@ -143,6 +145,8 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 | `list_tasks` | yes | yes | List pending or completed tasks, sorted by due date |
 | `get_task` | yes | yes | Read full task details including body and completion status |
 | `create_task` | yes | yes | Create a new task with subject, due date, importance |
+| `update_task` | yes | yes | Modify an existing task's subject, body, due date, importance, or completion |
+| `search_tasks` | yes | yes | Search tasks by keyword in their title |
 | `complete_task` | yes | yes | Mark a task as complete |
 | `delete_task` | yes | yes | Remove a task |
 

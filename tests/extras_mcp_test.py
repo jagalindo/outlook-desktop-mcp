@@ -49,14 +49,16 @@ async def run_tests():
                 tools_result = await session.list_tools()
                 tool_names = [t.name for t in tools_result.tools]
                 expected = [
-                    "list_tasks", "get_task", "create_task", "complete_task",
-                    "delete_task", "list_attachments", "save_attachment",
+                    "list_tasks", "get_task", "create_task", "update_task",
+                    "search_tasks", "complete_task",
+                    "delete_task", "forward_email", "create_draft",
+                    "list_attachments", "save_attachment",
                     "list_categories", "set_category", "list_rules",
                     "toggle_rule", "get_out_of_office",
                 ]
                 missing = [n for n in expected if n not in tool_names]
                 assert not missing, f"Missing tools: {missing}"
-                log(f"  All 12 new tools present (total: {len(tool_names)})")
+                log(f"  All {len(expected)} listed tools present (total: {len(tool_names)})")
                 passed += 1
                 log("  PASS")
             except Exception as e:
@@ -101,6 +103,23 @@ async def run_tests():
                 result = await session.call_tool("get_task", {"entry_id": task_entry_id})
                 data = json.loads(result.content[0].text)
                 log(f"  Subject: {data['subject']}, Importance: {data['importance']}")
+                passed += 1
+                log("  PASS")
+            except Exception as e:
+                log(f"  FAIL: {e}")
+
+            total += 1
+            log("\n--- Test 4b: update_task ---")
+            try:
+                assert task_entry_id
+                result = await session.call_tool("update_task", {
+                    "entry_id": task_entry_id,
+                    "subject": "MCP Extras Test Task (updated)",
+                    "importance": "low",
+                })
+                data = json.loads(result.content[0].text)
+                assert data.get("status") == "updated", data
+                log(f"  Updated: {data['subject']} (priority: {data.get('priority')})")
                 passed += 1
                 log("  PASS")
             except Exception as e:
