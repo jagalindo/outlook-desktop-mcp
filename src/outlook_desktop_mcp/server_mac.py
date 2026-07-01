@@ -52,10 +52,12 @@ mcp = FastMCP(
         "NOTE: entry_id values on macOS are numeric IDs (not hex strings like "
         "on Windows). They identify items within their folder context.\n\n"
         "AVAILABLE TOOL CATEGORIES:\n"
-        "- Email: send, list, read, search, reply, mark read/unread, move\n"
+        "- Email: send, draft, list, read, search, reply, forward, mark "
+        "read/unread, move\n"
         "- Calendar: list events, create appointments/meetings, update, delete, "
         "search events\n"
-        "- Tasks: create, list, update, complete, delete to-do items\n"
+        "- Tasks: create, list, update, search, complete, delete to-do items\n"
+        "- Categories: list color categories and set them on any item\n"
         "- Attachments: list and save attachments\n"
         "- Folders: list folder hierarchy"
     ),
@@ -1837,6 +1839,124 @@ end tell'''
         return f"Task deleted: '{name}'"
     except Exception as e:
         return f"Error deleting task: {e}"
+
+
+# =====================================================================
+# CATEGORY TOOLS
+# =====================================================================
+
+@mcp.tool()
+async def list_categories() -> str:
+    """List all available Outlook color categories.
+
+    Returns the categories configured in the user's Outlook profile. These
+    can be applied to emails, tasks, and events via set_category.
+
+    Returns:
+        JSON array of category objects with name and color.
+    """
+    script = f'''tell application "Microsoft Outlook"
+    set output to ""
+    repeat with c in categories
+        set cname to name of c
+        set ccolor to ""
+        try
+            set ccolor to color of c as text
+        end try
+        set output to output & cname & "{DELIM}" & ccolor & "{RECORD_DELIM}"
+    end repeat
+    return output
+end tell'''
+
+    try:
+        raw = await bridge.run(script)
+        if not raw:
+            return json.dumps([])
+
+        results = []
+        for record in raw.split(RECORD_DELIM):
+            record = record.strip()
+            if not record:
+                continue
+            parts = record.split(DELIM)
+            results.append({
+                "name": parts[0].strip(),
+                "color": parts[1].strip() if len(parts) > 1 else "",
+            })
+        return json.dumps(results, indent=2, default=str)
+    except Exception as e:
+        return f"Error listing categories: {e}"
+
+
+_ITEM_REF = {
+    "email": "message",
+    "message": "message",
+    "task": "task",
+    "event": "calendar event",
+    "calendar": "calendar event",
+}
+
+
+@mcp.tool()
+async def set_category(entry_id: str, categories: str, item_type: str) -> str:
+    """Set color categories on an email, task, or event.
+
+    Replaces any existing categories on the item. A category that does not
+    exist yet is created automatically (mirroring Outlook's behavior).
+
+    IMPORTANT: On macOS the numeric entry_id is only unique within an item
+    type — the same number can refer to a different email, task, and event —
+    so item_type is required to target the correct item.
+
+    Args:
+        entry_id: The numeric ID of the item.
+        categories: Category name(s), comma-separated. Example: "Important"
+            or "Work, Follow-up". Use an empty string to clear all categories.
+        item_type: The kind of item the entry_id refers to: "email", "task",
+            or "event".
+
+    Returns:
+        Confirmation with the item name and applied categories, or an error.
+    """
+    ref = _ITEM_REF.get(item_type.lower().strip())
+    if ref is None:
+        return json.dumps({"error": f"Invalid item_type: {item_type!r}. Use email, task, or event."})
+
+    names = [n.strip() for n in categories.split(",") if n.strip()]
+    # Build an AppleScript list literal of the requested category names.
+    list_literal = "{" + ", ".join(f'"{escape(n)}"' for n in names) + "}"
+
+    script = f'''tell application "Microsoft Outlook"
+    set theItem to {ref} id {entry_id}
+    set catList to {{}}
+    repeat with nm in {list_literal}
+        set nmT to nm as text
+        set matches to (categories whose name is nmT)
+        if (count of matches) > 0 then
+            set end of catList to item 1 of matches
+        else
+            set end of catList to (make new category with properties {{name:nmT}})
+        end if
+    end repeat
+    set category of theItem to catList
+    set itemName to ""
+    try
+        set itemName to subject of theItem
+    end try
+    if itemName is "" then
+        try
+            set itemName to name of theItem
+        end try
+    end if
+    return itemName
+end tell'''
+
+    try:
+        name = await bridge.run(script)
+        applied = ", ".join(names) if names else "(none)"
+        return f"Categories set on '{name}': {applied}"
+    except Exception as e:
+        return f"Error setting categories: {e}"
 
 
 # =====================================================================

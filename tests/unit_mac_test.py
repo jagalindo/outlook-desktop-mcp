@@ -174,6 +174,43 @@ async def main():
     out = json.loads(await s.list_tasks())
     check("list_tasks without filter keeps all (incl. undated)", len(out) == 4, detail=out)
 
+    # --- 9. categories -------------------------------------------------------
+    fake.response = rec("Work", "1") + rec("Personal", "2")
+    out = json.loads(await s.list_categories())
+    check("list_categories parses name/color records",
+          [c["name"] for c in out] == ["Work", "Personal"], detail=out)
+
+    # set_category targets the item type explicitly (no ambiguous resolution)
+    fake.response = "My Task"
+    await s.set_category("77", "Work, Follow-up", item_type="task")
+    scr = fake.last_script
+    check("set_category task uses `task id`", "set theItem to task id 77" in scr)
+    check("set_category builds requested name list",
+          '"Work"' in scr and '"Follow-up"' in scr)
+    check("set_category auto-creates missing categories",
+          "make new category with properties" in scr)
+
+    fake.response = "Some Email"
+    await s.set_category("5", "Important", item_type="email")
+    check("set_category email uses `message id`", "set theItem to message id 5" in fake.last_script)
+
+    fake.response = "Some Event"
+    await s.set_category("9", "Personal", item_type="event")
+    check("set_category event uses `calendar event id`",
+          "set theItem to calendar event id 9" in fake.last_script)
+
+    fake.calls = 0
+    out = json.loads(await s.set_category("1", "X", item_type="bogus"))
+    check("set_category rejects invalid item_type without running script",
+          "error" in out and fake.calls == 0, detail=out)
+
+    # clearing categories yields an empty AppleScript list literal
+    fake.calls = 0
+    fake.response = "Cleared Task"
+    await s.set_category("3", "", item_type="task")
+    check("set_category with empty string builds empty list `{}`",
+          "repeat with nm in {}" in fake.last_script)
+
     print(f"\n{passed}/{total} unit checks passed")
     return 0 if passed == total else 1
 

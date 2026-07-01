@@ -157,19 +157,26 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 | `list_attachments` | yes | yes | List all attachments on an email or calendar event |
 | `save_attachment` | yes | yes | Download an attachment to a local directory |
 
-### Categories, Rules, Out of Office (Windows only)
-
-These tools rely on COM-specific APIs (MAPI property accessors, the Rules object model, and the Categories collection) that Outlook for Mac does not expose through AppleScript.
+### Categories
 
 | Tool | Windows | macOS | Description |
 |------|:-------:|:-----:|-------------|
-| `list_categories` | yes | — | List all available color categories in Outlook |
-| `set_category` | yes | — | Set or clear categories on any email, event, or task |
+| `list_categories` | yes | yes | List all available color categories in Outlook |
+| `set_category` | yes | yes | Set or clear categories on an email, event, or task |
+
+> **macOS note:** `set_category` requires an `item_type` argument (`"email"`, `"task"`, or `"event"`). Unlike Windows EntryIDs, macOS numeric IDs are only unique *within* an item type, so the type is needed to target the correct item. On Windows the globally-unique EntryID makes `item_type` unnecessary.
+
+### Rules, Out of Office (Windows only)
+
+These tools rely on COM-specific APIs (the Rules object model and MAPI property accessors) that Outlook for Mac does not expose through AppleScript.
+
+| Tool | Windows | macOS | Description |
+|------|:-------:|:-----:|-------------|
 | `list_rules` | yes | — | List all mail rules with enabled/disabled status |
 | `toggle_rule` | yes | — | Enable or disable a mail rule by name |
 | `get_out_of_office` | yes | — | Check whether Out of Office auto-reply is on or off |
 
-**Total: 29 tools on Windows, 22 tools on macOS.**
+**Total: 34 tools on Windows, 29 tools on macOS.**
 
 ## Architecture Details
 
