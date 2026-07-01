@@ -19,6 +19,7 @@ from outlook_desktop_mcp.applescript_bridge import AppleScriptBridge
 from outlook_desktop_mcp.utils.applescript_helpers import (
     escape,
     format_date,
+    date_var_lines,
     parse_date,
     resolve_folder_ref,
     DELIM,
@@ -1186,7 +1187,8 @@ async def create_event(
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
 
-    props = f'subject:"{escape(subject)}", start time:{format_date(start_dt)}, end time:{format_date(end_dt)}'
+    date_lines = date_var_lines("startD", start_dt) + date_var_lines("endD", end_dt)
+    props = f'subject:"{escape(subject)}", start time:startD, end time:endD'
     if location:
         props += f', location:"{escape(location)}"'
     if body:
@@ -1195,6 +1197,7 @@ async def create_event(
         props += ', all day flag:true'
 
     script = f'''tell application "Microsoft Outlook"
+    {date_lines}
     set newEvt to make new calendar event with properties {{{props}}}
     return (id of newEvt as text) & "{DELIM}" & (subject of newEvt) & "{DELIM}" & (start time of newEvt as string) & "{DELIM}" & (end time of newEvt as string)
 end tell'''
@@ -1251,7 +1254,8 @@ async def create_meeting(
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
 
-    props = f'subject:"{escape(subject)}", start time:{format_date(start_dt)}, end time:{format_date(end_dt)}'
+    date_lines = date_var_lines("startD", start_dt) + date_var_lines("endD", end_dt)
+    props = f'subject:"{escape(subject)}", start time:startD, end time:endD'
     if location:
         props += f', location:"{escape(location)}"'
     if body:
@@ -1269,6 +1273,7 @@ async def create_meeting(
                 attendee_lines += f'make new optional attendee at newEvt with properties {{email address:{{address:"{escape(addr)}"}}}}\n'
 
     script = f'''tell application "Microsoft Outlook"
+    {date_lines}
     set newEvt to make new calendar event with properties {{{props}}}
     {attendee_lines}
     return (id of newEvt as text)
@@ -1315,10 +1320,12 @@ async def update_event(
         set_lines += f'set subject of e to "{escape(subject)}"\n'
     if start:
         start_dt = datetime.fromisoformat(start)
-        set_lines += f'set start time of e to {format_date(start_dt)}\n'
+        set_lines += date_var_lines("startD", start_dt)
+        set_lines += 'set start time of e to startD\n'
     if end:
         end_dt = datetime.fromisoformat(end)
-        set_lines += f'set end time of e to {format_date(end_dt)}\n'
+        set_lines += date_var_lines("endD", end_dt)
+        set_lines += 'set end time of e to endD\n'
     if location:
         set_lines += f'set location of e to "{escape(location)}"\n'
     if body:
@@ -1685,14 +1692,17 @@ async def create_task(
     imp_map = {"low": "priority low", "normal": "priority normal", "high": "priority high"}
     imp_val = imp_map.get(importance.lower(), "priority normal")
 
+    date_lines = ""
     props = f'name:"{escape(subject)}", priority:{imp_val}'
     if due_date:
         due_dt = datetime.fromisoformat(due_date)
-        props += f', due date:{format_date(due_dt)}'
+        date_lines += date_var_lines("dueD", due_dt)
+        props += ', due date:dueD'
     if body:
         props += f', content:"{escape(body)}"'
 
     script = f'''tell application "Microsoft Outlook"
+    {date_lines}
     set newTask to make new task with properties {{{props}}}
     return (id of newTask as text) & "{DELIM}" & (name of newTask)
 end tell'''
@@ -1747,10 +1757,12 @@ async def update_task(
         set_lines += f'set content of t to "{escape(body)}"\n'
     if due_date:
         due_dt = datetime.fromisoformat(due_date)
-        set_lines += f'set due date of t to {format_date(due_dt)}\n'
+        set_lines += date_var_lines("dueD", due_dt)
+        set_lines += 'set due date of t to dueD\n'
     if start_date:
         start_dt = datetime.fromisoformat(start_date)
-        set_lines += f'set start date of t to {format_date(start_dt)}\n'
+        set_lines += date_var_lines("startD", start_dt)
+        set_lines += 'set start date of t to startD\n'
     if importance:
         imp_val = imp_map.get(importance.lower())
         if imp_val is None:

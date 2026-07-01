@@ -22,8 +22,46 @@ def format_date(dt: datetime) -> str:
     Returns a string like: date "Sunday, March 22, 2026 at 2:00:00 PM"
     AppleScript parses dates based on the system locale, so we use a
     locale-friendly format that osascript can interpret.
+
+    DEPRECATED for building dates to assign to Outlook items: AppleScript's
+    ``date "..."`` coercion is locale-dependent and misreads this ISO string
+    on non-US systems (e.g. a Spanish-locale Mac parses "2026-07-03" into a
+    wildly wrong date). Use ``date_var_lines`` instead, which builds the date
+    from numeric components. This is kept only for backwards compatibility.
     """
     return f'date "{dt.strftime("%Y-%m-%d %H:%M:%S")}"'
+
+
+def date_var_lines(var: str, dt: datetime) -> str:
+    """Return AppleScript statements assigning a locale-independent date to `var`.
+
+    The date is built from numeric components rather than via ``date "..."``
+    string coercion, which AppleScript parses using the system's locale and
+    therefore misreads ISO date strings on non-US systems. Month and day are
+    reset to 1 before the real values are applied, so intermediate assignments
+    can never overflow a short month (e.g. setting month to February while the
+    day is still 31).
+
+    Example output (var="d")::
+
+        set d to (current date)
+        set year of d to 2026
+        set month of d to 1
+        set day of d to 1
+        set month of d to 7
+        set day of d to 3
+        set time of d to 0
+    """
+    secs = dt.hour * 3600 + dt.minute * 60 + dt.second
+    return (
+        f'set {var} to (current date)\n'
+        f'set year of {var} to {dt.year}\n'
+        f'set month of {var} to 1\n'
+        f'set day of {var} to 1\n'
+        f'set month of {var} to {dt.month}\n'
+        f'set day of {var} to {dt.day}\n'
+        f'set time of {var} to {secs}\n'
+    )
 
 
 def parse_date(text: str) -> str:

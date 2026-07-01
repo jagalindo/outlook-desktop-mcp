@@ -21,7 +21,8 @@ import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from outlook_desktop_mcp import server_mac as s
-from outlook_desktop_mcp.utils.applescript_helpers import DELIM, RECORD_DELIM
+from outlook_desktop_mcp.utils.applescript_helpers import DELIM, RECORD_DELIM, date_var_lines
+from datetime import datetime
 
 passed = 0
 total = 0
@@ -236,6 +237,26 @@ async def main():
     out = json.loads(await s.respond_to_meeting("71", "maybe"))
     check("respond rejects invalid response without running script",
           "error" in out and fake.calls == 0, detail=out)
+
+    # --- 11. locale-independent date construction ----------------------------
+    lines = date_var_lines("d", datetime(2026, 7, 3, 0, 0, 0))
+    check("date_var_lines builds from numeric components (no `date \"...\"`)",
+          'date "' not in lines and "set year of d to 2026" in lines)
+    check("date_var_lines resets month/day to 1 before applying real values",
+          lines.index("set month of d to 1") < lines.index("set month of d to 7")
+          and lines.index("set day of d to 1") < lines.index("set day of d to 3"))
+    tlines = date_var_lines("d", datetime(2026, 7, 3, 14, 30, 15))
+    check("date_var_lines encodes time as seconds since midnight",
+          f"set time of d to {14*3600 + 30*60 + 15}" in tlines)
+
+    # create_event must use the date variables, not a locale-parsed date string
+    fake.response = "99" + DELIM + "E" + DELIM + "s" + DELIM + "e"
+    await s.create_event(subject="E", start="2026-07-03", end="2026-07-04", all_day=True)
+    scr = fake.last_script
+    check("create_event uses date vars in properties, not date \"...\"",
+          "start time:startD" in scr and "end time:endD" in scr and 'start time:date "' not in scr)
+    check("create_event emits the date-builder lines",
+          "set year of startD to 2026" in scr and "set year of endD to 2026" in scr)
 
     print(f"\n{passed}/{total} unit checks passed")
     return 0 if passed == total else 1
