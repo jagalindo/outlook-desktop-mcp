@@ -83,6 +83,12 @@ def resolve_folder_ref(folder_name: str) -> str:
     return f'mail folder "{escape(folder_name)}"'
 
 
-# Delimiter used for structured AppleScript output
-DELIM = "|||"
-RECORD_DELIM = "==="
+# Delimiters used for structured AppleScript output.
+# These are ASCII control characters (Unit Separator / Record Separator) that
+# effectively never occur in email, calendar, or task content — unlike the old
+# "|||" / "===" which could appear in message bodies, subjects, or signatures
+# and silently corrupt field parsing. They survive an `osascript -e` round-trip
+# unchanged, and str.strip() only trims them at the very ends of the output
+# (harmless, since empty records are filtered out during parsing).
+DELIM = "\x1f"          # ASCII 31, Unit Separator — between fields
+RECORD_DELIM = "\x1e"   # ASCII 30, Record Separator — between records
