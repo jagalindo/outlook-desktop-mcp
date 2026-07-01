@@ -11,7 +11,6 @@ COM thread.
 import threading
 import queue
 import asyncio
-import sys
 import logging
 
 logger = logging.getLogger("outlook_desktop_mcp.com_bridge")

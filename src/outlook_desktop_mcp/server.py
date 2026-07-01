@@ -35,7 +35,6 @@ from outlook_desktop_mcp.tools._folder_constants import (
     OL_TASK_ITEM,
     OL_TASK_COMPLETE,
     OL_TASK_NOT_STARTED,
-    TASK_STATUS_NAMES,
     IMPORTANCE_NAMES,
 )
 from outlook_desktop_mcp.utils.formatting import (

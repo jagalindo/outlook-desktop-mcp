@@ -258,6 +258,81 @@ async def main():
     check("create_event emits the date-builder lines",
           "set year of startD to 2026" in scr and "set year of endD to 2026" in scr)
 
+    # --- entry_id validation: AppleScript injection must be rejected ---------
+    import tempfile
+
+    evil_id = '1\nend tell\ntell application "Finder" to activate\ntell application "Microsoft Outlook"'
+    calls_before = fake.calls
+    res = await s.mark_as_read(evil_id)
+    check("mark_as_read rejects non-numeric entry_id without running a script",
+          res.startswith("Error") and fake.calls == calls_before, detail=res)
+    res = await s.read_email(entry_id=evil_id)
+    check("read_email rejects non-numeric entry_id", res.startswith("Error") and fake.calls == calls_before)
+    res = await s.delete_event(entry_id="42; delete every calendar event")
+    check("delete_event rejects non-numeric entry_id", res.startswith("Error") and fake.calls == calls_before)
+    res = await s.set_category(entry_id="x", categories="Work", item_type="task")
+    check("set_category rejects non-numeric entry_id", res.startswith("Error") and fake.calls == calls_before)
+
+    fake.response = "Some subject"
+    res = await s.mark_as_read(" 042 ")
+    check("mark_as_read accepts numeric entry_id and normalizes it",
+          "message id 42" in fake.last_script and "Marked as read" in res, detail=fake.last_script)
+
+    # --- count clamping -------------------------------------------------------
+    fake.response = ""
+    await s.search_emails(query="x", folder="drafts", count=99999)
+    check("search_emails clamps count to 200", "set maxCount to 200" in fake.last_script)
+    await s.search_emails(query="x", folder="drafts", count=0)
+    check("search_emails clamps count up to 1", "set maxCount to 1" in fake.last_script)
+    await s.list_tasks(count=99999)
+    check("list_tasks clamps count to 200", "set maxCount to 200" in fake.last_script)
+
+    # --- save_attachment: hostile filename cannot escape save_directory ------
+    tmpdir = tempfile.mkdtemp(prefix="odm-test-")
+    fake.response = lambda script: (
+        "../../../etc/evil.txt" if "return name of a" in script else "OK"
+    )
+    out = json.loads(await s.save_attachment(entry_id="7", save_directory=tmpdir))
+    check("save_attachment strips traversal components from filename",
+          out["filename"] == "evil.txt", detail=out)
+    check("save_attachment keeps path inside save_directory",
+          os.path.realpath(out["path"]).startswith(os.path.realpath(tmpdir) + os.sep), detail=out)
+    check("save_attachment saves via a Python-built path (no aname concatenation)",
+          'save a in "' in fake.last_script and "& aname" not in fake.last_script)
+
+    calls_before = fake.calls
+    res = await s.save_attachment(entry_id="bad; rm", save_directory=tmpdir)
+    check("save_attachment rejects non-numeric entry_id",
+          res.startswith("Error") and fake.calls == calls_before)
+
+    # --- list_events filters to the requested date range ---------------------
+    fake.response = (
+        rec("1", "InRange", "2026-03-22 14:00:00", "2026-03-22 15:00:00", "", "", "false")
+        + rec("2", "TooEarly", "2026-03-01 09:00:00", "2026-03-01 10:00:00", "", "", "false")
+        + rec("3", "TooLate", "2026-05-01 09:00:00", "2026-05-01 10:00:00", "", "", "false")
+        + rec("4", "Unparseable", "someday maybe", "", "", "", "false")
+    )
+    out = json.loads(await s.list_events(start_date="2026-03-20", end_date="2026-03-25"))
+    subs = [e["subject"] for e in out]
+    check("list_events keeps only events inside the range (unparseable kept)",
+          subs == ["InRange", "Unparseable"], detail=subs)
+
+    # --- list_folders honors max_depth ---------------------------------------
+    fake.response = rec("Inbox", "5", "2", "1") + rec("Sub", "1", "0", "2")
+    out = json.loads(await s.list_folders(max_depth=2))
+    scr = fake.last_script
+    check("list_folders depth 2 recurses one level",
+          "repeat with f1 in mail folders" in scr
+          and "repeat with f2 in mail folders of f1" in scr
+          and "f3" not in scr, detail=scr)
+    check("list_folders parses depth field",
+          out[0]["depth"] == 1 and out[1]["depth"] == 2, detail=out)
+    await s.list_folders(max_depth=1)
+    check("list_folders depth 1 stays top-level", "mail folders of" not in fake.last_script)
+    await s.list_folders(max_depth=99)
+    check("list_folders clamps depth to 3",
+          "mail folders of f2" in fake.last_script and "f4" not in fake.last_script)
+
     print(f"\n{passed}/{total} unit checks passed")
     return 0 if passed == total else 1
 

@@ -16,6 +16,24 @@ def escape(text: str) -> str:
     return text
 
 
+def safe_id(entry_id) -> str:
+    """Validate an entry_id as a plain integer and return it as a string.
+
+    macOS Outlook item IDs are numeric. Because IDs are interpolated
+    unquoted into AppleScript (``message id 42``), anything non-numeric
+    could inject arbitrary script — so reject it here.
+
+    Raises ValueError if entry_id is not a non-negative integer.
+    """
+    text = str(entry_id).strip()
+    if not text.isdigit():
+        raise ValueError(
+            f"entry_id must be numeric (got {text!r}). "
+            "Use the id returned by list/search tools."
+        )
+    return str(int(text))  # normalize (strips leading zeros/unicode digits)
+
+
 def format_date(dt: datetime) -> str:
     """Convert a Python datetime to an AppleScript date string.
 

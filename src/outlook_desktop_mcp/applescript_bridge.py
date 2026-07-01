@@ -54,7 +54,7 @@ class AppleScriptBridge:
             await proc.communicate()
             raise RuntimeError(
                 f"AppleScript timed out after {timeout}s"
-            )
+            ) from None
 
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()

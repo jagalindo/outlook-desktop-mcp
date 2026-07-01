@@ -18,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from outlook_desktop_mcp.applescript_bridge import AppleScriptBridge
 from outlook_desktop_mcp.utils.applescript_helpers import (
     escape,
-    format_date,
+    safe_id,
     date_var_lines,
     parse_date,
     resolve_folder_ref,
@@ -79,6 +79,23 @@ def _clean(value: str) -> str:
     """Replace AppleScript's 'missing value' with empty string."""
     v = value.strip()
     return "" if v == "missing value" else v
+
+
+def _validated_id(entry_id) -> tuple[str | None, str | None]:
+    """Validate entry_id for unquoted AppleScript interpolation.
+
+    Returns (normalized_id, None) on success or (None, error_message) if the
+    id is not numeric — callers return the error string directly.
+    """
+    try:
+        return safe_id(entry_id), None
+    except ValueError as e:
+        return None, f"Error: {e}"
+
+
+def _clamp_count(count: int) -> int:
+    """Clamp a result-count argument to [1, 200], mirroring the Windows server."""
+    return max(1, min(int(count), 200))
 
 
 def _parse_due_bound(value: str, end_of_day: bool = False) -> datetime:
@@ -427,6 +444,7 @@ async def list_emails(
     Returns:
         JSON array of email summary objects.
     """
+    count = _clamp_count(count)
     folder_ref = resolve_folder_ref(folder)
     unread_filter = ' whose is read is false' if unread_only else ''
 
@@ -527,7 +545,9 @@ async def read_email(
         sender_name, received_time, unread, to, cc, body, attachment info).
     """
     if entry_id:
-        folder_ref = resolve_folder_ref(folder)
+        entry_id, err = _validated_id(entry_id)
+        if err:
+            return err
         script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set mid to id of m
@@ -659,6 +679,9 @@ async def mark_as_read(entry_id: str) -> str:
     Returns:
         Confirmation message with the email subject, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set is read of m to true
@@ -690,6 +713,9 @@ async def mark_as_unread(entry_id: str) -> str:
     Returns:
         Confirmation message with the email subject, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set is read of m to false
@@ -727,6 +753,9 @@ async def move_email(
     Returns:
         Confirmation with email subject and destination, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     dest_ref = resolve_folder_ref(target_folder)
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
@@ -769,6 +798,9 @@ async def reply_email(
     Returns:
         Confirmation indicating the reply was sent, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     try:
         att_lines = _attachment_lines(attachments, "replyMsg")
     except FileNotFoundError as e:
@@ -818,6 +850,9 @@ async def forward_email(
     Returns:
         Confirmation indicating the message was forwarded, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     to_lines = _recipient_lines(to, "to recipient")
     cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
 
@@ -862,22 +897,45 @@ async def list_folders(max_depth: int = 2) -> str:
 
     Args:
         max_depth: How many levels deep to recurse into subfolders.
-            Default 2. Set to 1 for top-level only.
+            Default 2, maximum 3. Set to 1 for top-level only.
 
     Returns:
-        JSON array of folder objects with name, item_count, and unread_count.
+        JSON array of folder objects with name, item_count, unread_count,
+        and depth (1 = top level).
     """
-    script = f'''tell application "Microsoft Outlook"
-    set allFolders to mail folders
-    set output to ""
-    repeat with f in allFolders
-        set fname to name of f
-        set fcount to count of messages of f
-        set funread to unread count of f
-        set output to output & fname & "{DELIM}" & (fcount as text) & "{DELIM}" & (funread as text) & "{RECORD_DELIM}"
-    end repeat
-    return output
-end tell'''
+    max_depth = max(1, min(int(max_depth), 3))
+
+    def _level(level: int, indent: str) -> str:
+        var = f"f{level}"
+        source = "mail folders" if level == 1 else f"mail folders of f{level - 1}"
+        lines = f'{indent}repeat with {var} in {source}\n'
+        lines += f'{indent}    set fname to name of {var}\n'
+        lines += f'{indent}    set fcount to 0\n'
+        lines += f'{indent}    try\n'
+        lines += f'{indent}        set fcount to count of messages of {var}\n'
+        lines += f'{indent}    end try\n'
+        lines += f'{indent}    set funread to 0\n'
+        lines += f'{indent}    try\n'
+        lines += f'{indent}        set funread to unread count of {var}\n'
+        lines += f'{indent}    end try\n'
+        lines += (
+            f'{indent}    set output to output & fname & "{DELIM}" & (fcount as text) & '
+            f'"{DELIM}" & (funread as text) & "{DELIM}" & "{level}" & "{RECORD_DELIM}"\n'
+        )
+        if level < max_depth:
+            lines += f'{indent}    try\n'
+            lines += _level(level + 1, indent + "        ")
+            lines += f'{indent}    end try\n'
+        lines += f'{indent}end repeat\n'
+        return lines
+
+    script = (
+        'tell application "Microsoft Outlook"\n'
+        '    set output to ""\n'
+        + _level(1, "    ")
+        + '    return output\n'
+        'end tell'
+    )
 
     try:
         raw = await bridge.run(script)
@@ -896,6 +954,7 @@ end tell'''
                 "name": parts[0].strip(),
                 "item_count": int(parts[1].strip()) if parts[1].strip().isdigit() else 0,
                 "unread_count": int(parts[2].strip()) if parts[2].strip().isdigit() else 0,
+                "depth": int(parts[3].strip()) if len(parts) > 3 and parts[3].strip().isdigit() else 1,
             })
         return json.dumps(results, indent=2, default=str)
     except Exception as e:
@@ -927,6 +986,7 @@ async def search_emails(
     Returns:
         JSON array of matching email summaries, or an error.
     """
+    count = _clamp_count(count)
     folder_ref = resolve_folder_ref(folder)
     safe_query = escape(query)
 
@@ -1021,6 +1081,7 @@ async def list_events(
     Returns:
         JSON array of event summary objects.
     """
+    count = _clamp_count(count)
     start = datetime.fromisoformat(start_date) if start_date else datetime.now()
     end = datetime.fromisoformat(end_date) if end_date else start + timedelta(days=7)
 
@@ -1067,6 +1128,12 @@ end tell'''
             parts = record.split(DELIM)
             if len(parts) < 7:
                 continue
+            # Filter to the requested range; events whose start time cannot
+            # be parsed (unrecognized locale format) are kept rather than
+            # silently dropped.
+            evt_start = _due_to_datetime(parts[2].strip())
+            if evt_start is not None and not (start <= evt_start <= end):
+                continue
             results.append({
                 "entry_id": parts[0].strip(),
                 "subject": parts[1].strip() or "(no subject)",
@@ -1076,6 +1143,8 @@ end tell'''
                 "organizer": _clean(parts[5]),
                 "all_day": parts[6].strip().lower() == "true",
             })
+            if len(results) >= count:
+                break
         return json.dumps(results, indent=2, default=str)
     except Exception as e:
         return f"Error listing events: {e}"
@@ -1099,6 +1168,9 @@ async def get_event(entry_id: str) -> str:
     Returns:
         JSON object with full event details.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     set eid to id of e
@@ -1315,6 +1387,9 @@ async def update_event(
     Returns:
         Confirmation with updated event details, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     set_lines = ""
     if subject:
         set_lines += f'set subject of e to "{escape(subject)}"\n'
@@ -1373,6 +1448,9 @@ async def delete_event(entry_id: str) -> str:
     Returns:
         Confirmation with the event subject, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     set esubject to subject of e
@@ -1413,6 +1491,7 @@ async def search_events(
     Returns:
         JSON array of matching event summaries.
     """
+    count = _clamp_count(count)
     safe_query = escape(query)
 
     script = f'''tell application "Microsoft Outlook"
@@ -1504,6 +1583,9 @@ async def respond_to_meeting(
     Returns:
         Confirmation of your response, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     resp = response.lower().strip()
     verb = _MEETING_RESPONSE_VERB.get(resp)
     if verb is None:
@@ -1555,6 +1637,7 @@ async def list_tasks(
     Returns:
         JSON array of task summary objects.
     """
+    count = _clamp_count(count)
     ds = _parse_due_bound(due_start) if due_start else None
     de = _parse_due_bound(due_end, end_of_day=True) if due_end else None
     filtering = ds is not None or de is not None
@@ -1630,6 +1713,9 @@ async def get_task(entry_id: str) -> str:
     Returns:
         JSON object with full task details including body.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set t to task id {entry_id}
     set tid to id of t
@@ -1748,6 +1834,9 @@ async def update_task(
     Returns:
         Confirmation with updated task details, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     imp_map = {"low": "priority low", "normal": "priority normal", "high": "priority high"}
 
     set_lines = ""
@@ -1813,6 +1902,7 @@ async def search_tasks(
     Returns:
         JSON array of matching task summary objects.
     """
+    count = _clamp_count(count)
     safe_query = escape(query)
     completed_filter = "" if include_completed else " and todo flag is not completed"
 
@@ -1874,6 +1964,9 @@ async def complete_task(entry_id: str) -> str:
     Returns:
         Confirmation with the task subject.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set t to task id {entry_id}
     set todo flag of t to completed
@@ -1897,6 +1990,9 @@ async def delete_task(entry_id: str) -> str:
     Returns:
         Confirmation with the task subject.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set t to task id {entry_id}
     set tname to name of t
@@ -1988,6 +2084,9 @@ async def set_category(entry_id: str, categories: str, item_type: str) -> str:
     Returns:
         Confirmation with the item name and applied categories, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     ref = _ITEM_REF.get(item_type.lower().strip())
     if ref is None:
         return json.dumps({"error": f"Invalid item_type: {item_type!r}. Use email, task, or event."})
@@ -2043,6 +2142,9 @@ async def list_attachments(entry_id: str) -> str:
     Returns:
         JSON array of attachment objects with index and filename.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set attList to attachments of m
@@ -2100,49 +2202,58 @@ async def save_attachment(
     Returns:
         The full file path where the attachment was saved, or an error.
     """
+    entry_id, err = _validated_id(entry_id)
+    if err:
+        return err
+    if attachment_index < 1:
+        return f"Error: attachment_index must be >= 1 (got {attachment_index})"
+
     if not save_directory:
         save_directory = os.path.join(os.path.expanduser("~"), "Downloads")
+    save_directory = os.path.realpath(save_directory)
     os.makedirs(save_directory, exist_ok=True)
 
-    # Use POSIX path for AppleScript
-    save_dir_posix = save_directory
-
-    script = f'''tell application "Microsoft Outlook"
+    # Phase 1: fetch the attachment's name so it can be sanitized in Python
+    # before it is used to build a filesystem path (mirrors the Windows server).
+    name_script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set attList to attachments of m
     set attCount to count of attList
     if attCount < {attachment_index} then return "ERROR:Only " & attCount & " attachment(s), requested index {attachment_index}"
     set a to item {attachment_index} of attList
-    set aname to name of a
-    set savePath to POSIX file "{escape(save_dir_posix)}/{escape("__PLACEHOLDER__")}"
-    save a in file ((POSIX path of (POSIX file "{escape(save_dir_posix)}")) & aname)
-    return aname
-end tell'''
-
-    # Simpler approach: save to known path
-    script = f'''tell application "Microsoft Outlook"
-    set m to message id {entry_id}
-    set attList to attachments of m
-    set attCount to count of attList
-    if attCount < {attachment_index} then return "ERROR:Only " & attCount & " attachment(s)"
-    set a to item {attachment_index} of attList
-    set aname to name of a
-    set savePath to "{escape(save_dir_posix)}/" & aname
-    save a in savePath
-    return aname & "{DELIM}" & savePath
+    return name of a
 end tell'''
 
     try:
-        raw = await bridge.run(script)
-        if raw.startswith("ERROR:"):
-            return raw
+        raw_name = await bridge.run(name_script)
+        if raw_name.startswith("ERROR:"):
+            return raw_name
 
-        parts = raw.split(DELIM)
-        filename = parts[0].strip() if len(parts) > 0 else "unknown"
-        save_path = os.path.join(save_directory, filename)
+        # Strip path separators and dangerous characters from filename
+        safe_name = os.path.basename(raw_name.strip())
+        safe_name = re.sub(r'[^\w\.\-_ ]', '_', safe_name)
+        if not safe_name:
+            safe_name = "attachment"
+
+        save_path = os.path.join(save_directory, safe_name)
+
+        # Ensure final path is still inside the intended directory
+        if not os.path.realpath(save_path).startswith(save_directory + os.sep) and \
+           os.path.realpath(save_path) != save_directory:
+            return "Error: Attachment filename would escape the target directory."
+
+        # Phase 2: save to the sanitized, fully-resolved path.
+        save_script = f'''tell application "Microsoft Outlook"
+    set m to message id {entry_id}
+    set a to item {attachment_index} of (attachments of m)
+    save a in "{escape(save_path)}"
+    return "OK"
+end tell'''
+        await bridge.run(save_script)
+
         result = {
             "status": "saved",
-            "filename": filename,
+            "filename": safe_name,
             "path": save_path,
         }
         return json.dumps(result, indent=2, default=str)
