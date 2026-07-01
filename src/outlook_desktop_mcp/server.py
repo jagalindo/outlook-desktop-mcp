@@ -34,6 +34,7 @@ from outlook_desktop_mcp.tools._folder_constants import (
     OL_OPTIONAL,
     OL_TASK_ITEM,
     OL_TASK_COMPLETE,
+    OL_TASK_NOT_STARTED,
     TASK_STATUS_NAMES,
     IMPORTANCE_NAMES,
 )
@@ -1351,6 +1352,55 @@ async def list_tasks(
 
 
 @mcp.tool()
+async def search_tasks(
+    query: str,
+    include_completed: bool = False,
+    count: int = 20,
+    account: str = "",
+) -> str:
+    """Search tasks by keyword in their title.
+
+    Args:
+        query: The search term (case-insensitive substring match on the task
+            title). Examples: "invoice", "follow up", "call".
+        include_completed: If true, include completed tasks. Default false.
+        count: Maximum number of tasks to return. Default 20.
+        account: Optional. Account display name (or substring) to target.
+
+    Returns:
+        JSON array of matching task summary objects.
+    """
+    def _search(outlook, namespace, query, include_completed, count, account):
+        count = min(max(1, count), 200)
+        store = _require_store(namespace, account)
+        folder = store.GetDefaultFolder(OL_FOLDER_TASKS)
+        items = folder.Items
+        items.Sort("[DueDate]")
+
+        if not include_completed:
+            items = items.Restrict("[Complete] = False")
+
+        needle = query.lower()
+        results = []
+        for i in range(items.Count):
+            if len(results) >= count:
+                break
+            try:
+                item = items.Item(i + 1)
+                subject = item.Subject or ""
+                if needle in subject.lower():
+                    results.append(format_task_summary(item))
+            except Exception:
+                continue
+        return json.dumps(results, indent=2, default=str)
+
+    try:
+        return await bridge.call(_search, query, include_completed, count, account)
+    except Exception as e:
+        return f"Error searching tasks: {format_com_error(e)}"
+
+
+@mcp.tool()
 async def get_task(entry_id: str, account: str = "") -> str:
     """Read the full details of a specific task.
 
@@ -1436,6 +1486,101 @@ async def create_task(
         )
     except Exception as e:
         return f"Error creating task: {format_com_error(e)}"
+
+
+@mcp.tool()
+async def update_task(
+    entry_id: str,
+    subject: str = "",
+    body: str = "",
+    due_date: str = "",
+    importance: str = "",
+    reminder_minutes: int = -1,
+    complete: bool | None = None,
+    account: str = "",
+) -> str:
+    """Update an existing task.
+
+    Modifies properties of a task. Only the fields you provide will be
+    updated — omitted fields remain unchanged.
+
+    Args:
+        entry_id: The unique Outlook EntryID of the task to update.
+        subject: Optional. New task title.
+        body: Optional. New description/notes.
+        due_date: Optional. New due date in ISO 8601 format (e.g. "2026-03-01").
+        importance: Optional. "low", "normal", or "high".
+        reminder_minutes: Optional. Minutes before due date to remind. Use 0
+            to clear the reminder. Default -1 (leave unchanged).
+        complete: Optional. Set true to mark complete, false to reopen.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        Confirmation with updated task details, or an error.
+    """
+    imp_map = {"low": 0, "normal": 1, "high": 2}
+    if importance and importance.lower() not in imp_map:
+        return json.dumps({"error": f"Invalid importance: {importance!r}. Use low, normal, or high."})
+
+    def _update(outlook, namespace, entry_id, subject, body, due_date,
+                importance, reminder_minutes, complete, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_TASK, "task item"):
+            return err
+
+        changed = False
+        if subject:
+            item.Subject = subject
+            changed = True
+        if body:
+            item.Body = body
+            changed = True
+        if due_date:
+            item.DueDate = due_date
+            changed = True
+        if importance:
+            item.Importance = imp_map[importance.lower()]
+            changed = True
+        if reminder_minutes >= 0:
+            if reminder_minutes > 0:
+                item.ReminderSet = True
+                item.ReminderMinutesBeforeStart = reminder_minutes
+            else:
+                item.ReminderSet = False
+            changed = True
+        if complete is not None:
+            if complete:
+                item.Status = OL_TASK_COMPLETE
+                item.PercentComplete = 100
+            else:
+                item.Status = OL_TASK_NOT_STARTED
+                item.PercentComplete = 0
+            changed = True
+
+        if not changed:
+            return json.dumps({"error": "No fields to update"})
+
+        item.Save()
+        return json.dumps({
+            "status": "updated",
+            "entry_id": item.EntryID,
+            "subject": item.Subject,
+            "complete": item.Status == OL_TASK_COMPLETE,
+            "priority": IMPORTANCE_NAMES.get(item.Importance, str(item.Importance)),
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(
+            _update, entry_id, subject, body, due_date, importance,
+            reminder_minutes, complete, account,
+        )
+    except Exception as e:
+        return f"Error updating task: {format_com_error(e)}"
 
 
 @mcp.tool()

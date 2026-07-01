@@ -55,7 +55,7 @@ mcp = FastMCP(
         "- Email: send, list, read, search, reply, mark read/unread, move\n"
         "- Calendar: list events, create appointments/meetings, update, delete, "
         "search events\n"
-        "- Tasks: create, list, complete, delete to-do items\n"
+        "- Tasks: create, list, update, complete, delete to-do items\n"
         "- Attachments: list and save attachments\n"
         "- Folders: list folder hierarchy"
     ),
@@ -1439,6 +1439,145 @@ end tell'''
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
         return f"Error creating task: {e}"
+
+
+@mcp.tool()
+async def update_task(
+    entry_id: str,
+    subject: str = "",
+    body: str = "",
+    due_date: str = "",
+    start_date: str = "",
+    importance: str = "",
+    complete: bool | None = None,
+) -> str:
+    """Update an existing task.
+
+    Modifies properties of a task. Only the fields you provide will be
+    updated — omitted fields remain unchanged.
+
+    Args:
+        entry_id: The numeric ID of the task to update.
+        subject: Optional. New task title.
+        body: Optional. New description/notes.
+        due_date: Optional. New due date in ISO 8601 format (e.g. "2026-03-01").
+        start_date: Optional. New start date in ISO 8601 format.
+        importance: Optional. "low", "normal", or "high".
+        complete: Optional. Set true to mark complete, false to reopen.
+
+    Returns:
+        Confirmation with updated task details, or an error.
+    """
+    imp_map = {"low": "priority low", "normal": "priority normal", "high": "priority high"}
+
+    set_lines = ""
+    if subject:
+        set_lines += f'set name of t to "{escape(subject)}"\n'
+    if body:
+        set_lines += f'set content of t to "{escape(body)}"\n'
+    if due_date:
+        due_dt = datetime.fromisoformat(due_date)
+        set_lines += f'set due date of t to {format_date(due_dt)}\n'
+    if start_date:
+        start_dt = datetime.fromisoformat(start_date)
+        set_lines += f'set start date of t to {format_date(start_dt)}\n'
+    if importance:
+        imp_val = imp_map.get(importance.lower())
+        if imp_val is None:
+            return json.dumps({"error": f"Invalid importance: {importance!r}. Use low, normal, or high."})
+        set_lines += f'set priority of t to {imp_val}\n'
+    if complete is not None:
+        flag = "completed" if complete else "not completed"
+        set_lines += f'set todo flag of t to {flag}\n'
+
+    if not set_lines:
+        return json.dumps({"error": "No fields to update"})
+
+    script = f'''tell application "Microsoft Outlook"
+    set t to task id {entry_id}
+    {set_lines}
+    return (id of t as text) & "{DELIM}" & (name of t) & "{DELIM}" & (todo flag of t as text) & "{DELIM}" & (priority of t as text)
+end tell'''
+
+    try:
+        raw = await bridge.run(script)
+        parts = raw.split(DELIM)
+        result = {
+            "status": "updated",
+            "entry_id": parts[0].strip() if len(parts) > 0 else entry_id,
+            "subject": parts[1].strip() if len(parts) > 1 else "",
+            "complete": parts[2].strip() == "completed" if len(parts) > 2 else None,
+            "priority": parts[3].strip() if len(parts) > 3 else "",
+        }
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return f"Error updating task: {e}"
+
+
+@mcp.tool()
+async def search_tasks(
+    query: str,
+    include_completed: bool = False,
+    count: int = 20,
+) -> str:
+    """Search tasks by keyword in their title.
+
+    Args:
+        query: The search term (case-insensitive substring match on the task
+            title). Examples: "invoice", "follow up", "call".
+        include_completed: If true, include completed tasks. Default false.
+        count: Maximum number of tasks to return. Default 20.
+
+    Returns:
+        JSON array of matching task summary objects.
+    """
+    safe_query = escape(query)
+    completed_filter = "" if include_completed else " and todo flag is not completed"
+
+    script = f'''tell application "Microsoft Outlook"
+    set taskList to tasks whose name contains "{safe_query}"{completed_filter}
+    set taskCount to count of taskList
+    set maxCount to {count}
+    if taskCount < maxCount then set maxCount to taskCount
+    set output to ""
+    repeat with i from 1 to maxCount
+        set t to item i of taskList
+        set tid to id of t
+        set tname to name of t
+        set tdue to ""
+        try
+            set tdue to due date of t as string
+        end try
+        set tflag to todo flag of t
+        set tpriority to priority of t
+        set output to output & (tid as text) & "{DELIM}" & tname & "{DELIM}" & tdue & "{DELIM}" & (tflag as text) & "{DELIM}" & (tpriority as text) & "{RECORD_DELIM}"
+    end repeat
+    return output
+end tell'''
+
+    try:
+        raw = await bridge.run(script)
+        if not raw:
+            return json.dumps([])
+
+        results = []
+        for record in raw.split(RECORD_DELIM):
+            record = record.strip()
+            if not record:
+                continue
+            parts = record.split(DELIM)
+            if len(parts) < 5:
+                continue
+            results.append({
+                "entry_id": parts[0].strip(),
+                "subject": parts[1].strip() or "(no subject)",
+                "due_date": _clean(parts[2]) or None,
+                "complete": parts[3].strip() == "completed",
+                "priority": parts[4].strip(),
+            })
+        return json.dumps(results, indent=2, default=str)
+    except Exception as e:
+        return f"Error searching tasks: {e}"
 
 
 @mcp.tool()
