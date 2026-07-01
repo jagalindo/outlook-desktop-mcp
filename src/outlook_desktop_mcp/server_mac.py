@@ -78,6 +78,30 @@ def _clean(value: str) -> str:
     return "" if v == "missing value" else v
 
 
+def _parse_due_bound(value: str, end_of_day: bool = False) -> datetime:
+    """Parse an ISO 8601 date/datetime the caller passed as a due-date bound.
+
+    A date with no time component is normalized to the start of that day, or —
+    when end_of_day is set (for an inclusive upper bound) — to 23:59:59.
+    """
+    dt = datetime.fromisoformat(value)
+    date_only = "T" not in value and ":" not in value
+    if end_of_day and date_only:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return dt
+
+
+def _due_to_datetime(due_raw: str) -> datetime | None:
+    """Convert an AppleScript due-date string to a datetime, or None if it is
+    empty or cannot be parsed."""
+    if not due_raw:
+        return None
+    try:
+        return datetime.fromisoformat(parse_date(due_raw))
+    except ValueError:
+        return None
+
+
 def _recipient_lines(addresses: str, kind: str) -> str:
     """Build AppleScript `make new <kind> ...` lines from a semicolon-separated
     list of email addresses, attaching each to the message named `newMsg`."""
@@ -1443,6 +1467,8 @@ end tell'''
 async def list_tasks(
     include_completed: bool = False,
     count: int = 20,
+    due_start: str = "",
+    due_end: str = "",
 ) -> str:
     """List tasks from the Outlook Tasks folder.
 
@@ -1453,16 +1479,27 @@ async def list_tasks(
         include_completed: If true, include completed tasks. Default false
             (only pending/in-progress tasks).
         count: Maximum number of tasks to return. Default 20.
+        due_start: Optional. Only return tasks due on or after this date
+            (ISO 8601, e.g. "2026-03-01"). Tasks with no due date are excluded
+            when any due filter is set.
+        due_end: Optional. Only return tasks due on or before this date. A
+            date with no time is treated as inclusive of that whole day.
 
     Returns:
         JSON array of task summary objects.
     """
+    ds = _parse_due_bound(due_start) if due_start else None
+    de = _parse_due_bound(due_end, end_of_day=True) if due_end else None
+    filtering = ds is not None or de is not None
+
     completed_filter = "" if include_completed else " whose todo flag is not completed"
+    # Overfetch when filtering, since the count cap is applied after date filtering.
+    fetch_limit = count * 5 if filtering else count
 
     script = f'''tell application "Microsoft Outlook"
     set taskList to tasks{completed_filter}
     set taskCount to count of taskList
-    set maxCount to {count}
+    set maxCount to {fetch_limit}
     if taskCount < maxCount then set maxCount to taskCount
     set output to ""
     repeat with i from 1 to maxCount
@@ -1493,13 +1530,24 @@ end tell'''
             parts = record.split(DELIM)
             if len(parts) < 5:
                 continue
+            due_raw = _clean(parts[2])
+            if filtering:
+                due_dt = _due_to_datetime(due_raw)
+                if due_dt is None:
+                    continue
+                if ds is not None and due_dt < ds:
+                    continue
+                if de is not None and due_dt > de:
+                    continue
             results.append({
                 "entry_id": parts[0].strip(),
                 "subject": parts[1].strip() or "(no subject)",
-                "due_date": _clean(parts[2]) or None,
+                "due_date": due_raw or None,
                 "complete": parts[3].strip() == "completed",
                 "priority": parts[4].strip(),
             })
+            if len(results) >= count:
+                break
         return json.dumps(results, indent=2, default=str)
     except Exception as e:
         return f"Error listing tasks: {e}"

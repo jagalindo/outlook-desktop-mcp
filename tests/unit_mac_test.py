@@ -144,6 +144,36 @@ async def main():
     check("send_email emits attachment line for a real file",
           "make new attachment at newMsg" in fake.last_script and "POSIX file" in fake.last_script)
 
+    # --- 8. list_tasks due-date filtering ------------------------------------
+    def _tasks_payload():
+        return (
+            rec("1", "Early", "2026-03-01 09:00:00", "not completed", "priority normal")
+            + rec("2", "Mid", "2026-03-15 09:00:00", "not completed", "priority normal")
+            + rec("3", "Late", "2026-04-01 09:00:00", "not completed", "priority normal")
+            + rec("4", "NoDue", "missing value", "not completed", "priority normal")
+        )
+
+    fake.response = _tasks_payload()
+    out = json.loads(await s.list_tasks(due_start="2026-03-10"))
+    subs = [t["subject"] for t in out]
+    check("list_tasks due_start excludes earlier and undated tasks",
+          subs == ["Mid", "Late"], detail=subs)
+
+    fake.response = _tasks_payload()
+    out = json.loads(await s.list_tasks(due_end="2026-03-20"))
+    subs = [t["subject"] for t in out]
+    check("list_tasks due_end excludes later and undated tasks",
+          subs == ["Early", "Mid"], detail=subs)
+
+    fake.response = _tasks_payload()
+    out = json.loads(await s.list_tasks(due_start="2026-03-10", due_end="2026-03-20"))
+    subs = [t["subject"] for t in out]
+    check("list_tasks due range keeps only in-window task", subs == ["Mid"], detail=subs)
+
+    fake.response = _tasks_payload()
+    out = json.loads(await s.list_tasks())
+    check("list_tasks without filter keeps all (incl. undated)", len(out) == 4, detail=out)
+
     print(f"\n{passed}/{total} unit checks passed")
     return 0 if passed == total else 1
 

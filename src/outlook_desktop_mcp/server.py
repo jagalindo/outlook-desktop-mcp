@@ -1463,6 +1463,8 @@ async def search_events(
 async def list_tasks(
     include_completed: bool = False,
     count: int = 20,
+    due_start: str = "",
+    due_end: str = "",
     account: str = "",
 ) -> str:
     """List tasks from the Outlook Tasks folder.
@@ -1475,13 +1477,18 @@ async def list_tasks(
         include_completed: If true, include completed tasks. Default false
             (only pending/in-progress tasks).
         count: Maximum number of tasks to return. Default 20.
+        due_start: Optional. Only return tasks due on or after this date
+            (ISO 8601, e.g. "2026-03-01"). Tasks with no due date are excluded
+            when any due filter is set.
+        due_end: Optional. Only return tasks due on or before this date. A
+            date with no time is treated as inclusive of that whole day.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of task summary objects.
     """
-    def _list(outlook, namespace, include_completed, count, account):
+    def _list(outlook, namespace, include_completed, count, due_start, due_end, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         folder = store.GetDefaultFolder(OL_FOLDER_TASKS)
@@ -1490,6 +1497,15 @@ async def list_tasks(
 
         if not include_completed:
             items = items.Restrict("[Complete] = False")
+        if due_start:
+            start = _parse_date(due_start)
+            items = items.Restrict(f"[DueDate] >= '{start.strftime('%m/%d/%Y %H:%M')}'")
+        if due_end:
+            end = _parse_date(due_end)
+            # A date with no time means "through the end of that day".
+            if end.hour == 0 and end.minute == 0 and end.second == 0 and ":" not in due_end:
+                end = end.replace(hour=23, minute=59, second=59)
+            items = items.Restrict(f"[DueDate] <= '{end.strftime('%m/%d/%Y %H:%M')}'")
 
         results = []
         limit = min(count, items.Count)
@@ -1501,7 +1517,7 @@ async def list_tasks(
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_list, include_completed, count, account)
+        return await bridge.call(_list, include_completed, count, due_start, due_end, account)
     except Exception as e:
         return f"Error listing tasks: {format_com_error(e)}"
 
