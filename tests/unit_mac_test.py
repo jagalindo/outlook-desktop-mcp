@@ -211,6 +211,32 @@ async def main():
     check("set_category with empty string builds empty list `{}`",
           "repeat with nm in {}" in fake.last_script)
 
+    # --- 10. respond_to_meeting ---------------------------------------------
+    fake.response = "Team sync"
+    await s.respond_to_meeting("71", "accept", comment="See you there")
+    scr = fake.last_script
+    check("respond accept uses `accept invite` on a meeting message",
+          "accept invite mm" in scr and "set mm to meeting message id 71" in scr)
+    check("respond accept sends response with comment",
+          "sending response true" in scr and 'comment "See you there"' in scr)
+
+    fake.response = "Team sync"
+    await s.respond_to_meeting("71", "tentative")
+    check("respond tentative uses tentative verb",
+          "accept tentatively invite mm" in fake.last_script)
+
+    fake.response = "Team sync"
+    await s.respond_to_meeting("71", "decline", send_response=False, comment="skip")
+    scr = fake.last_script
+    check("respond decline uses decline verb", "decline invite mm" in scr)
+    check("respond with send_response=false omits response and comment",
+          "sending response false" in scr and "comment" not in scr)
+
+    fake.calls = 0
+    out = json.loads(await s.respond_to_meeting("71", "maybe"))
+    check("respond rejects invalid response without running script",
+          "error" in out and fake.calls == 0, detail=out)
+
     print(f"\n{passed}/{total} unit checks passed")
     return 0 if passed == total else 1
 

@@ -135,8 +135,10 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 | `create_meeting` | yes | yes | Create a meeting and send invitations to attendees |
 | `update_event` | yes | yes | Modify an existing event's subject, time, location, etc. |
 | `delete_event` | yes | yes | Delete an appointment or cancel a meeting |
-| `respond_to_meeting` | yes | — | Accept, decline, or tentatively accept a meeting invite |
+| `respond_to_meeting` | yes | yes | Accept, decline, or tentatively accept a meeting invite |
 | `search_events` | yes | yes | Search calendar events by keyword within a date range |
+
+> **macOS note:** `respond_to_meeting` acts on the meeting **invite message** in your mailbox, so its `entry_id` is that message's id (not a calendar event id). It also accepts `send_response` (default true) and an optional `comment` to the organizer.
 
 ### Tasks
 
@@ -176,7 +178,7 @@ These tools rely on COM-specific APIs (the Rules object model and MAPI property 
 | `toggle_rule` | yes | — | Enable or disable a mail rule by name |
 | `get_out_of_office` | yes | — | Check whether Out of Office auto-reply is on or off |
 
-**Total: 34 tools on Windows, 29 tools on macOS.**
+**Total: 34 tools on Windows, 30 tools on macOS.**
 
 ## Architecture Details
 

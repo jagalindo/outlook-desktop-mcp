@@ -55,7 +55,7 @@ mcp = FastMCP(
         "- Email: send, draft, list, read, search, reply, forward, mark "
         "read/unread, move\n"
         "- Calendar: list events, create appointments/meetings, update, delete, "
-        "search events\n"
+        "search events, respond to meeting invites\n"
         "- Tasks: create, list, update, search, complete, delete to-do items\n"
         "- Categories: list color categories and set them on any item\n"
         "- Attachments: list and save attachments\n"
@@ -1459,6 +1459,64 @@ end tell'''
         return json.dumps(results, indent=2, default=str)
     except Exception as e:
         return f"Error searching events: {e}"
+
+
+# =====================================================================
+# TOOL: respond_to_meeting
+# =====================================================================
+
+_MEETING_RESPONSE_VERB = {
+    "accept": "accept invite",
+    "tentative": "accept tentatively invite",
+    "decline": "decline invite",
+}
+
+
+@mcp.tool()
+async def respond_to_meeting(
+    entry_id: str,
+    response: str,
+    send_response: bool = True,
+    comment: str = "",
+) -> str:
+    """Respond to a meeting invitation (accept, decline, or tentative).
+
+    Operates on a meeting invite message in your mailbox. The meeting is
+    added to (or updated on) your calendar accordingly, and — unless
+    send_response is false — a response is sent to the organizer.
+
+    Args:
+        entry_id: The numeric ID of the meeting-invite message. Note this is
+            the id of the invite message, not a calendar event id.
+        response: Your response. One of: "accept", "decline", or "tentative".
+        send_response: If true (default), send your response to the organizer.
+            If false, update your calendar without notifying the organizer.
+        comment: Optional. A note to include with the response (sent to the
+            organizer). Ignored when send_response is false.
+
+    Returns:
+        Confirmation of your response, or an error.
+    """
+    resp = response.lower().strip()
+    verb = _MEETING_RESPONSE_VERB.get(resp)
+    if verb is None:
+        return json.dumps({"error": f"Invalid response: {response!r}. Use accept, decline, or tentative."})
+
+    send_flag = "true" if send_response else "false"
+    comment_part = f' comment "{escape(comment)}"' if (comment and send_response) else ""
+
+    script = f'''tell application "Microsoft Outlook"
+    set mm to meeting message id {entry_id}
+    set subj to subject of mm
+    {verb} mm sending response {send_flag}{comment_part}
+    return subj
+end tell'''
+
+    try:
+        subj = await bridge.run(script)
+        return f"Responded '{resp}' to meeting: '{subj}'"
+    except Exception as e:
+        return f"Error responding to meeting: {e}"
 
 
 # =====================================================================
