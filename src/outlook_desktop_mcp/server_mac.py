@@ -54,7 +54,7 @@ mcp = FastMCP(
         "on Windows). They identify items within their folder context.\n\n"
         "AVAILABLE TOOL CATEGORIES:\n"
         "- Email: send, draft, list, read, search, reply, forward, mark "
-        "read/unread, move\n"
+        "read/unread, move, snooze/unsnooze (follow-up flag + reminder)\n"
         "- Calendar: list events, create appointments/meetings, update, delete, "
         "search events, respond to meeting invites\n"
         "- Tasks: create, list, update, search, complete, delete to-do items\n"
@@ -378,10 +378,12 @@ async def create_draft(
 
     content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
 
+    # No explicit `save`: Outlook's AppleScript `save` verb demands an
+    # `in <file>` parameter for outgoing messages and fails with -1701.
+    # `make new outgoing message` already persists the item to Drafts.
     script = f'''tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
     {to_lines}{cc_lines}{bcc_lines}{att_lines}
-    save newMsg
     return (id of newMsg as text) & "{DELIM}" & (subject of newMsg)
 end tell'''
 
@@ -740,6 +742,125 @@ end tell'''
         return f"Moved '{subject}' to {target_folder}"
     except Exception as e:
         return f"Error moving email: {e}"
+
+
+# =====================================================================
+# TOOL: snooze_email
+# =====================================================================
+
+@mcp.tool()
+async def snooze_email(
+    entry_id: str,
+    until: str,
+    move_to_folder: str = "",
+) -> str:
+    """Postpone (snooze) an email: flag it for follow-up with a reminder.
+
+    Sets the message's follow-up flag and schedules an Outlook reminder
+    that pops up at the given time. Optionally also moves the message out
+    of its current folder (e.g. to a "Snoozed"/"Pospuesto" folder) so the
+    inbox stays clean until the reminder fires.
+
+    NOTE: The message does NOT automatically return to the inbox at the
+    reminder time — Outlook shows the reminder, and the flagged message
+    also appears in the To-Do views. Use unsnooze_email to clear the flag
+    (and optionally move it back to the inbox).
+
+    Args:
+        entry_id: The numeric ID of the email to snooze.
+        until: When the reminder should fire, in ISO 8601 format.
+            Examples: "2026-02-25 09:00", "2026-02-25T09:00:00".
+        move_to_folder: Optional. A folder to move the message to while it
+            is snoozed (same names as move_email, e.g. "Pospuesto").
+            Top-level folders only. Leave empty to keep the message where
+            it is. IMPORTANT: moving assigns a NEW entry_id, returned in
+            the result.
+
+    Returns:
+        JSON with status, entry_id (the new one if moved), subject,
+        reminder time, and folder, or an error.
+    """
+    try:
+        until_dt = datetime.fromisoformat(until)
+    except ValueError:
+        return json.dumps({"error": f"Invalid ISO 8601 datetime: {until!r}"})
+
+    date_lines = date_var_lines("remD", until_dt)
+    move_line = ""
+    if move_to_folder:
+        move_line = f"set m to move m to {resolve_folder_ref(move_to_folder)}\n    "
+
+    script = f'''tell application "Microsoft Outlook"
+    {date_lines}
+    set m to message id {entry_id}
+    set todo flag of m to not completed
+    set start date of m to remD
+    set due date of m to remD
+    set reminder date time of m to remD
+    {move_line}return (id of m as text) & "{DELIM}" & (subject of m)
+end tell'''
+
+    try:
+        raw = await bridge.run(script)
+        parts = raw.split(DELIM)
+        result = {
+            "status": "snoozed",
+            "entry_id": parts[0].strip() if len(parts) > 0 else entry_id,
+            "subject": parts[1].strip() if len(parts) > 1 else "",
+            "reminder": until_dt.isoformat(),
+            "folder": move_to_folder or "(unchanged)",
+        }
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return f"Error snoozing email: {e}"
+
+
+# =====================================================================
+# TOOL: unsnooze_email
+# =====================================================================
+
+@mcp.tool()
+async def unsnooze_email(
+    entry_id: str,
+    move_to_inbox: bool = False,
+) -> str:
+    """Clear the snooze (follow-up flag and reminder) from an email.
+
+    Removes the follow-up flag and cancels the pending reminder set by
+    snooze_email. Optionally moves the message back to the inbox.
+
+    Args:
+        entry_id: The numeric ID of the email to unsnooze.
+        move_to_inbox: If true, also move the message back to the inbox.
+            IMPORTANT: moving assigns a NEW entry_id, returned in the result.
+
+    Returns:
+        JSON with status, entry_id (the new one if moved), and subject,
+        or an error.
+    """
+    move_line = "set m to move m to inbox\n    " if move_to_inbox else ""
+
+    script = f'''tell application "Microsoft Outlook"
+    set m to message id {entry_id}
+    set todo flag of m to not flagged
+    set start date of m to missing value
+    set due date of m to missing value
+    set reminder date time of m to missing value
+    {move_line}return (id of m as text) & "{DELIM}" & (subject of m)
+end tell'''
+
+    try:
+        raw = await bridge.run(script)
+        parts = raw.split(DELIM)
+        result = {
+            "status": "unsnoozed",
+            "entry_id": parts[0].strip() if len(parts) > 0 else entry_id,
+            "subject": parts[1].strip() if len(parts) > 1 else "",
+            "folder": "inbox" if move_to_inbox else "(unchanged)",
+        }
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return f"Error unsnoozing email: {e}"
 
 
 # =====================================================================

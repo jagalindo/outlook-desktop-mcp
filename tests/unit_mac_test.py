@@ -94,12 +94,55 @@ async def main():
     check("search_tasks returns all matching records", len(out) == 2, detail=out)
     check("search_tasks escapes query into `contains`", 'contains "call"' in fake.last_script)
 
-    # --- 4. create_draft: saves (does not send) and parses id ----------------
+    # --- 4. create_draft: persists without send/save and parses id -----------
+    # `make new outgoing message` already persists to Drafts; an explicit
+    # `save` fails with -1701 on outgoing messages (requires an `in <file>`).
     fake.response = "990" + DELIM + "Hello"
     out = json.loads(await s.create_draft("a@b.com", "Hello", "hi"))
     check("create_draft parses entry_id", out.get("entry_id") == "990", detail=out)
-    check("create_draft uses `save` not `send`",
-          "save newMsg" in fake.last_script and "send newMsg" not in fake.last_script)
+    check("create_draft does not `send` or `save`",
+          "save newMsg" not in fake.last_script and "send newMsg" not in fake.last_script)
+    check("create_draft adds recipient", 'address:"a@b.com"' in fake.last_script)
+
+    # --- 4b. snooze_email / unsnooze_email -----------------------------------
+    fake.response = "42" + DELIM + "Some subject"
+    out = json.loads(await s.snooze_email("42", "2026-07-25 09:00"))
+    scr = fake.last_script
+    check("snooze_email flags for follow-up", "set todo flag of m to not completed" in scr)
+    check("snooze_email sets reminder from date vars",
+          "set reminder date time of m to remD" in scr and "set year of remD to 2026" in scr
+          and 'date "' not in scr)
+    check("snooze_email sets due date", "set due date of m to remD" in scr)
+    check("snooze_email without folder does not move", "move m to" not in scr)
+    check("snooze_email returns reminder ISO", out.get("reminder") == "2026-07-25T09:00:00",
+          detail=out)
+
+    fake.response = "77" + DELIM + "Some subject"
+    out = json.loads(await s.snooze_email("42", "2026-07-25T09:00:00", move_to_folder="Pospuesto"))
+    scr = fake.last_script
+    check("snooze_email with folder moves the message",
+          'set m to move m to mail folder "Pospuesto"' in scr)
+    check("snooze_email returns post-move entry_id", out.get("entry_id") == "77", detail=out)
+
+    fake.calls = 0
+    out = json.loads(await s.snooze_email("42", "next tuesday"))
+    check("snooze_email rejects invalid datetime without running script",
+          "error" in out and fake.calls == 0, detail=out)
+
+    fake.response = "42" + DELIM + "Some subject"
+    out = json.loads(await s.unsnooze_email("42"))
+    scr = fake.last_script
+    check("unsnooze_email clears flag", "set todo flag of m to not flagged" in scr)
+    check("unsnooze_email clears reminder and dates",
+          "set reminder date time of m to missing value" in scr
+          and "set due date of m to missing value" in scr)
+    check("unsnooze_email without move keeps folder", "move m to" not in scr)
+
+    fake.response = "88" + DELIM + "Some subject"
+    out = json.loads(await s.unsnooze_email("42", move_to_inbox=True))
+    check("unsnooze_email move_to_inbox moves to inbox",
+          "set m to move m to inbox" in fake.last_script)
+    check("unsnooze_email returns post-move entry_id", out.get("entry_id") == "88", detail=out)
 
     # --- 5. update_task: builds the right `set` lines ------------------------
     fake.response = rec("7", "Renamed", "not completed", "priority high").rstrip(RECORD_DELIM)

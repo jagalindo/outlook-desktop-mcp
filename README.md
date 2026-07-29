@@ -123,6 +123,8 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 | `mark_as_read` | yes | yes | Mark a specific email as read |
 | `mark_as_unread` | yes | yes | Mark a specific email as unread |
 | `move_email` | yes | yes | Move an email to Archive, Trash, or any folder |
+| `snooze_email` | no | yes | Postpone an email: follow-up flag + Outlook reminder at a chosen time, optionally moving it to a snooze folder |
+| `unsnooze_email` | no | yes | Clear the follow-up flag and reminder, optionally moving the email back to the inbox |
 | `list_folders` | yes | yes | Browse the folder hierarchy with item counts |
 
 ### Calendar
