@@ -16,6 +16,38 @@ def escape(text: str) -> str:
     return text
 
 
+def text_to_html(text: str, wrap: bool = True) -> str:
+    """Convert plain text to HTML so its line breaks survive.
+
+    Outlook for Mac's ``content`` property is documented as *the HTML content*
+    of a message, event, or task — assigning raw plain text to it makes Outlook
+    treat that text as markup, so newlines collapse into ordinary whitespace
+    and the body renders as one run-on paragraph. The text is therefore
+    HTML-escaped and its newlines turned into ``<br>`` before assignment.
+
+    Args:
+        text: The plain text to convert.
+        wrap: When true (default) the result is wrapped in
+            ``<html><body>…</body></html>``. Pass false when the fragment is
+            being prepended to content that already carries those tags, such as
+            the quoted original in a reply or forward.
+
+    Returns an empty string for empty input, so callers can keep skipping the
+    property entirely when there is no body.
+    """
+    if not text:
+        return ""
+    escaped = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    # Normalise CRLF / CR to LF first so no line break is emitted twice.
+    escaped = escaped.replace("\r\n", "\n").replace("\r", "\n")
+    html = escaped.replace("\n", "<br>")
+    return f"<html><body>{html}</body></html>" if wrap else html
+
+
 def format_date(dt: datetime) -> str:
     """Convert a Python datetime to an AppleScript date string.
 

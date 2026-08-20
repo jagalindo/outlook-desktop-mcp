@@ -18,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from outlook_desktop_mcp.applescript_bridge import AppleScriptBridge
 from outlook_desktop_mcp.utils.applescript_helpers import (
     escape,
+    text_to_html,
     format_date,
     date_var_lines,
     parse_date,
@@ -300,12 +301,12 @@ async def send_email(
         to: One or more recipient email addresses, separated by semicolons.
             Example: "alice@example.com" or "alice@example.com; bob@example.com"
         subject: The email subject line.
-        body: The plain-text body of the email. If html_body is also provided,
-            both are set and Outlook will prefer the HTML version.
+        body: The plain-text body of the email. Line breaks are preserved.
+            Ignored when html_body is provided.
         cc: Optional. CC recipients, separated by semicolons.
         bcc: Optional. BCC recipients, separated by semicolons.
-        html_body: Optional. HTML-formatted body. When provided, Outlook renders
-            the email as HTML. The plain-text body serves as fallback.
+        html_body: Optional. HTML-formatted body, used verbatim instead of
+            body. Supply a full fragment, e.g. "<p>Hello</p>".
         attachments: Optional. A list of absolute file paths to attach.
 
     Returns:
@@ -320,7 +321,10 @@ async def send_email(
     except FileNotFoundError as e:
         return json.dumps({"error": str(e)})
 
-    content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
+    # `content` is Outlook's HTML body property, so a plain-text body has to be
+    # converted to HTML or its line breaks collapse. (There is no `html content`
+    # property — naming it is an AppleScript syntax error.)
+    content_prop = f'content:"{escape(html_body or text_to_html(body))}"'
 
     script = f'''tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
@@ -358,10 +362,10 @@ async def create_draft(
     Args:
         to: One or more recipient email addresses, separated by semicolons.
         subject: The email subject line.
-        body: The plain-text body of the email.
+        body: The plain-text body of the email. Line breaks are preserved.
         cc: Optional. CC recipients, separated by semicolons.
         bcc: Optional. BCC recipients, separated by semicolons.
-        html_body: Optional. HTML-formatted body.
+        html_body: Optional. HTML-formatted body, used verbatim instead of body.
         attachments: Optional. A list of absolute file paths to attach.
 
     Returns:
@@ -376,7 +380,10 @@ async def create_draft(
     except FileNotFoundError as e:
         return json.dumps({"error": str(e)})
 
-    content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
+    # `content` is Outlook's HTML body property, so a plain-text body has to be
+    # converted to HTML or its line breaks collapse. (There is no `html content`
+    # property — naming it is an AppleScript syntax error.)
+    content_prop = f'content:"{escape(html_body or text_to_html(body))}"'
 
     # No explicit `save`: Outlook's AppleScript `save` verb demands an
     # `in <file>` parameter for outgoing messages and fails with -1701.
@@ -900,7 +907,7 @@ async def reply_email(
     set m to message id {entry_id}
     set msubject to subject of m
     set replyMsg to {reply_cmd} m
-    set content of replyMsg to "{escape(body)}" & return & return & content of replyMsg
+    set content of replyMsg to "{escape(text_to_html(body, wrap=False))}<br><br>" & content of replyMsg
     {att_lines}send replyMsg
     return msubject
 end tell'''
@@ -950,7 +957,8 @@ async def forward_email(
     comment_line = ""
     if comment:
         comment_line = (
-            f'set content of fwdMsg to "{escape(comment)}" & return & return '
+            f'set content of fwdMsg to '
+            f'"{escape(text_to_html(comment, wrap=False))}<br><br>" '
             f'& content of fwdMsg\n'
         )
 
@@ -1313,7 +1321,7 @@ async def create_event(
     if location:
         props += f', location:"{escape(location)}"'
     if body:
-        props += f', content:"{escape(body)}"'
+        props += f', content:"{escape(text_to_html(body))}"'
     if all_day:
         props += ', all day flag:true'
 
@@ -1380,7 +1388,7 @@ async def create_meeting(
     if location:
         props += f', location:"{escape(location)}"'
     if body:
-        props += f', content:"{escape(body)}"'
+        props += f', content:"{escape(text_to_html(body))}"'
 
     attendee_lines = ""
     for addr in required_attendees.split(";"):
@@ -1450,7 +1458,7 @@ async def update_event(
     if location:
         set_lines += f'set location of e to "{escape(location)}"\n'
     if body:
-        set_lines += f'set content of e to "{escape(body)}"\n'
+        set_lines += f'set content of e to "{escape(text_to_html(body))}"\n'
 
     if not set_lines:
         return json.dumps({"error": "No fields to update"})
@@ -1820,7 +1828,7 @@ async def create_task(
         date_lines += date_var_lines("dueD", due_dt)
         props += ', due date:dueD'
     if body:
-        props += f', content:"{escape(body)}"'
+        props += f', content:"{escape(text_to_html(body))}"'
 
     script = f'''tell application "Microsoft Outlook"
     {date_lines}
@@ -1875,7 +1883,7 @@ async def update_task(
     if subject:
         set_lines += f'set name of t to "{escape(subject)}"\n'
     if body:
-        set_lines += f'set content of t to "{escape(body)}"\n'
+        set_lines += f'set content of t to "{escape(text_to_html(body))}"\n'
     if due_date:
         due_dt = datetime.fromisoformat(due_date)
         set_lines += date_var_lines("dueD", due_dt)
