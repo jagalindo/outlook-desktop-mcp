@@ -56,8 +56,11 @@ mcp = FastMCP(
         "AVAILABLE TOOL CATEGORIES:\n"
         "- Email: send, draft, list, read, search, reply, forward, mark "
         "read/unread, move, snooze/unsnooze (follow-up flag + reminder)\n"
-        "- Calendar: list events, create appointments/meetings, update, delete, "
-        "search events, respond to meeting invites\n"
+        "- Calendar: list calendars, list events, create appointments/meetings, "
+        "update, delete, search events, respond to meeting invites\n"
+        "  A profile usually holds many calendars across several accounts, and "
+        "their names are not unique. Call list_calendars first and address a "
+        "calendar by its numeric calendar_id, never by name.\n"
         "- Tasks: create, list, update, search, complete, delete to-do items\n"
         "- Categories: list color categories and set them on any item\n"
         "- Attachments: list and save attachments\n"
@@ -1124,67 +1127,184 @@ end tell'''
 
 
 # =====================================================================
-# TOOL 10: list_events
+# Calendar helpers
+# =====================================================================
+
+# AppleScript handlers that render a date as ISO 8601. Outlook returns dates
+# coerced with `as string`, which follows the system locale ("miércoles, 23 de
+# septiembre de 2026, 10:00:00" on a Spanish Mac) and is therefore neither
+# parseable nor sortable. Building the string from numeric components sidesteps
+# the locale entirely. These must sit at the top level of the script — outside
+# any `tell` block — and are called as `my isoDate(...)`.
+_ISO_PRELUDE = '''on pad2(n)
+    set t to (n as integer) as text
+    if (length of t) < 2 then set t to "0" & t
+    return t
+end pad2
+
+on isoDate(d)
+    if d is missing value then return ""
+    return ((year of d) as text) & "-" & my pad2((month of d) as integer) & "-" & my pad2(day of d) & "T" & my pad2(hours of d) & ":" & my pad2(minutes of d) & ":" & my pad2(seconds of d)
+end isoDate
+'''
+
+# Number of fields in one serialized event record, see _event_record_script.
+_EVENT_FIELD_COUNT = 10
+
+
+def _calendar_scope(calendar_id: str) -> str:
+    """Return the AppleScript collection of events to query.
+
+    An empty `calendar_id` means Outlook's global ``calendar events``
+    collection, which spans every calendar of every account. A supplied id
+    narrows it to that one calendar.
+
+    Raises ValueError if the id is not a plain integer — the value is
+    interpolated into the script, so it must never be free text.
+    """
+    cid = str(calendar_id).strip()
+    if not cid:
+        return "calendar events"
+    return f"calendar events of calendar id {int(cid)}"
+
+
+def _events_query(calendar_id: str, clauses: list[str]) -> str:
+    """Build the event collection expression, optionally filtered.
+
+    Outlook evaluates a `whose` clause internally, which is dramatically faster
+    than fetching every event and filtering in Python: narrowing 2393 events to
+    a 60-day window takes ~0.25s through `whose` versus ~44s iterating.
+    """
+    base = _calendar_scope(calendar_id)
+    if not clauses:
+        return base
+    return f"({base} whose {' and '.join(clauses)})"
+
+
+def _event_record_script(var: str = "e") -> str:
+    """AppleScript appending one delimited record for event `var` to `output`.
+
+    Field order matches _parse_event_record: id, subject, start, end, location,
+    organizer, all-day flag, calendar id, calendar name, recurring flag.
+
+    Every optional property is read inside its own `try` so that a single
+    unreadable field degrades to an empty string instead of aborting the whole
+    listing — Outlook exposes these inconsistently across account types.
+    """
+    return f'''        set esubj to ""
+        try
+            set esubj to (subject of {var}) as text
+        end try
+        set eloc to ""
+        try
+            set eloc to (location of {var}) as text
+        end try
+        set eorg to ""
+        try
+            set eorg to (organizer of {var}) as text
+        end try
+        set ecalId to ""
+        set ecalName to ""
+        try
+            set ecalId to (id of (calendar of {var})) as text
+            set ecalName to (name of (calendar of {var})) as text
+        end try
+        set erec to "false"
+        try
+            if (recurrence of {var}) is not missing value then set erec to "true"
+        end try
+        set output to output & ((id of {var}) as text) & "{DELIM}" & esubj & "{DELIM}" & my isoDate(start time of {var}) & "{DELIM}" & my isoDate(end time of {var}) & "{DELIM}" & eloc & "{DELIM}" & eorg & "{DELIM}" & ((all day flag of {var}) as text) & "{DELIM}" & ecalId & "{DELIM}" & ecalName & "{DELIM}" & erec & "{RECORD_DELIM}"
+'''
+
+
+def _parse_event_record(record: str) -> dict | None:
+    """Parse one delimited event record, or None if it is malformed."""
+    parts = record.split(DELIM)
+    if len(parts) < _EVENT_FIELD_COUNT:
+        return None
+    return {
+        "entry_id": parts[0].strip(),
+        "subject": parts[1].strip() or "(no subject)",
+        "start": parts[2].strip(),
+        "end": parts[3].strip(),
+        "location": _clean(parts[4]),
+        "organizer": _clean(parts[5]),
+        "all_day": parts[6].strip().lower() == "true",
+        "calendar_id": parts[7].strip(),
+        "calendar": _clean(parts[8]),
+        "is_recurring": parts[9].strip().lower() == "true",
+    }
+
+
+def _parse_event_records(raw: str) -> list[dict]:
+    """Parse a full AppleScript response into event dicts, sorted by start time.
+
+    The ISO 8601 start strings sort lexicographically, so no date parsing is
+    needed. Outlook returns events in no particular order.
+    """
+    events = []
+    for record in raw.split(RECORD_DELIM):
+        record = record.strip()
+        if not record:
+            continue
+        parsed = _parse_event_record(record)
+        if parsed is not None:
+            events.append(parsed)
+    events.sort(key=lambda ev: ev["start"])
+    return events
+
+
+# Calendar listings walk every event of every calendar, so they need more room
+# than the bridge's 30s default.
+_CALENDAR_TIMEOUT = 120
+
+
+# =====================================================================
+# TOOL: list_calendars
 # =====================================================================
 
 @mcp.tool()
-async def list_events(
-    start_date: str = "",
-    end_date: str = "",
-    count: int = 20,
-) -> str:
-    """List upcoming calendar events from Outlook.
+async def list_calendars() -> str:
+    """List every calendar Outlook knows about, across all accounts.
 
-    Returns a JSON array of event summaries within a date range, sorted by
-    start time. Each summary has entry_id, subject, start, end, duration,
-    location, organizer, and attendee info.
+    Use this to discover calendar_id values for list_events, search_events and
+    create_event. Calendar names are NOT unique — a profile can hold several
+    calendars called "Calendar" in different accounts — so always target a
+    calendar by its id, never by name.
 
-    Use entry_id from results with get_event, update_event, or delete_event.
-
-    Args:
-        start_date: Start of date range in ISO 8601 format (e.g. "2026-02-25"
-            or "2026-02-25 09:00"). Default: now.
-        end_date: End of date range. Default: 7 days from start_date.
-        count: Maximum number of events to return. Default 20.
+    Outlook also exposes each account's root folder inside the calendar
+    collection. Those are containers, not calendars: they have no name and hold
+    no events. They are omitted here.
 
     Returns:
-        JSON array of event summary objects.
+        JSON array of calendar objects with calendar_id, name, account and
+        event_count. `account` is empty for calendars Outlook does not attribute
+        to an account (shared and subscribed calendars, typically).
     """
-    start = datetime.fromisoformat(start_date) if start_date else datetime.now()
-    end = datetime.fromisoformat(end_date) if end_date else start + timedelta(days=7)
-
-    # Fetch more than needed, filter by date in Python since AppleScript
-    # whose-clause date filtering can be unreliable in Outlook for Mac.
-    fetch_limit = count * 3  # overfetch to account for out-of-range events
-
     script = f'''tell application "Microsoft Outlook"
-    set evts to calendar events
-    set evtCount to count of evts
-    set maxFetch to {fetch_limit}
-    if evtCount < maxFetch then set maxFetch to evtCount
     set output to ""
-    repeat with i from 1 to maxFetch
-        set e to item i of evts
-        set eid to id of e
-        set esubject to subject of e
-        set estart to start time of e as string
-        set eend to end time of e as string
-        set elocation to ""
+    repeat with c in calendars
+        set cname to missing value
         try
-            set elocation to location of e
+            set cname to name of c
         end try
-        set eorganizer to ""
-        try
-            set eorganizer to organizer of e
-        end try
-        set eallday to all day flag of e
-        set output to output & (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
+        if cname is not missing value then
+            set cacct to ""
+            try
+                set cacct to (name of (account of c)) as text
+            end try
+            set ccount to ""
+            try
+                set ccount to (count of (calendar events of c)) as text
+            end try
+            set output to output & ((id of c) as text) & "{DELIM}" & (cname as text) & "{DELIM}" & cacct & "{DELIM}" & ccount & "{RECORD_DELIM}"
+        end if
     end repeat
     return output
 end tell'''
 
     try:
-        raw = await bridge.run(script)
+        raw = await bridge.run(script, timeout=_CALENDAR_TIMEOUT)
         if not raw:
             return json.dumps([])
 
@@ -1194,18 +1314,88 @@ end tell'''
             if not record:
                 continue
             parts = record.split(DELIM)
-            if len(parts) < 7:
+            if len(parts) < 4:
                 continue
+            count_raw = parts[3].strip()
             results.append({
-                "entry_id": parts[0].strip(),
-                "subject": parts[1].strip() or "(no subject)",
-                "start": parts[2].strip(),
-                "end": parts[3].strip(),
-                "location": _clean(parts[4]),
-                "organizer": _clean(parts[5]),
-                "all_day": parts[6].strip().lower() == "true",
+                "calendar_id": parts[0].strip(),
+                "name": parts[1].strip(),
+                "account": _clean(parts[2]),
+                "event_count": int(count_raw) if count_raw.isdigit() else None,
             })
         return json.dumps(results, indent=2, default=str)
+    except Exception as e:
+        return f"Error listing calendars: {e}"
+
+
+# =====================================================================
+# TOOL 10: list_events
+# =====================================================================
+
+@mcp.tool()
+async def list_events(
+    start_date: str = "",
+    end_date: str = "",
+    count: int = 20,
+    calendar_id: str = "",
+) -> str:
+    """List calendar events from Outlook within a date range.
+
+    Returns a JSON array of event summaries sorted by start time. Each summary
+    carries entry_id, subject, start, end, location, organizer, all_day, the
+    calendar it lives in (calendar_id and calendar), and is_recurring.
+
+    Use entry_id from results with get_event, update_event, or delete_event.
+
+    By default this spans every calendar of every account. Pass calendar_id
+    (from list_calendars) to list a single calendar.
+
+    Note on recurring events: the date range is matched against each event's own
+    start time, which for a recurring series is its FIRST occurrence. An ongoing
+    weekly series that began before start_date is therefore not listed, even
+    though it still has occurrences inside the range. Such events are flagged
+    with is_recurring when they do appear.
+
+    Args:
+        start_date: Start of date range in ISO 8601 format (e.g. "2026-02-25"
+            or "2026-02-25 09:00"). Default: now.
+        end_date: End of date range. Default: 7 days from start_date.
+        count: Maximum number of events to return, applied after sorting.
+            Default 20.
+        calendar_id: Optional. Restrict to one calendar, e.g. "133". Get ids
+            from list_calendars. Default: all calendars.
+
+    Returns:
+        JSON array of event summary objects.
+    """
+    start = datetime.fromisoformat(start_date) if start_date else datetime.now()
+    end = datetime.fromisoformat(end_date) if end_date else start + timedelta(days=7)
+
+    try:
+        scope = _events_query(calendar_id, [
+            "start time is greater than or equal to startD",
+            "start time is less than or equal to endD",
+        ])
+    except ValueError:
+        return json.dumps({"error": f"Invalid calendar_id: {calendar_id!r}. Expected a number from list_calendars."})
+
+    date_lines = date_var_lines("startD", start) + date_var_lines("endD", end)
+
+    script = f'''{_ISO_PRELUDE}
+tell application "Microsoft Outlook"
+    {date_lines}
+    set evts to {scope}
+    set output to ""
+    repeat with e in evts
+{_event_record_script("e")}    end repeat
+    return output
+end tell'''
+
+    try:
+        raw = await bridge.run(script, timeout=_CALENDAR_TIMEOUT)
+        if not raw:
+            return json.dumps([])
+        return json.dumps(_parse_event_records(raw)[:count], indent=2, default=str)
     except Exception as e:
         return f"Error listing events: {e}"
 
@@ -1219,7 +1409,7 @@ async def get_event(entry_id: str) -> str:
     """Read the full details of a specific calendar event.
 
     Retrieves complete event information including body/description,
-    attendees, and recurrence status.
+    attendees, the calendar the event lives in, and whether it recurs.
 
     Args:
         entry_id: The numeric ID of the event. Get this from list_events
@@ -1228,12 +1418,11 @@ async def get_event(entry_id: str) -> str:
     Returns:
         JSON object with full event details.
     """
-    script = f'''tell application "Microsoft Outlook"
+    script = f'''{_ISO_PRELUDE}
+tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     set eid to id of e
     set esubject to subject of e
-    set estart to start time of e as string
-    set eend to end time of e as string
     set elocation to ""
     try
         set elocation to location of e
@@ -1254,13 +1443,23 @@ async def get_event(entry_id: str) -> str:
             set eattendees to eattendees & address of a & "; "
         end repeat
     end try
-    return (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{DELIM}" & ebody & "{DELIM}" & eattendees
+    set ecalId to ""
+    set ecalName to ""
+    try
+        set ecalId to (id of (calendar of e)) as text
+        set ecalName to (name of (calendar of e)) as text
+    end try
+    set erec to "false"
+    try
+        if (recurrence of e) is not missing value then set erec to "true"
+    end try
+    return (eid as text) & "{DELIM}" & esubject & "{DELIM}" & my isoDate(start time of e) & "{DELIM}" & my isoDate(end time of e) & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{DELIM}" & ebody & "{DELIM}" & eattendees & "{DELIM}" & ecalId & "{DELIM}" & ecalName & "{DELIM}" & erec
 end tell'''
 
     try:
         raw = await bridge.run(script)
-        parts = raw.split(DELIM, 8)
-        if len(parts) < 9:
+        parts = raw.split(DELIM, 11)
+        if len(parts) < 12:
             return json.dumps({"error": "Failed to parse event data"})
 
         result = {
@@ -1273,6 +1472,9 @@ end tell'''
             "all_day": parts[6].strip().lower() == "true",
             "body": _truncate(_clean(parts[7])),
             "attendees": parts[8].strip(),
+            "calendar_id": parts[9].strip(),
+            "calendar": _clean(parts[10]),
+            "is_recurring": parts[11].strip().lower() == "true",
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
@@ -1292,6 +1494,7 @@ async def create_event(
     body: str = "",
     all_day: bool = False,
     reminder_minutes: int = 15,
+    calendar_id: str = "",
 ) -> str:
     """Create a personal calendar appointment (no attendees).
 
@@ -1309,12 +1512,21 @@ async def create_event(
         all_day: If true, creates an all-day event. Default false.
         reminder_minutes: Minutes before the event to show a reminder.
             Default 15. Set to 0 to disable reminder.
+        calendar_id: Optional. Create the event in this calendar, e.g. "133".
+            Get ids from list_calendars. Default: Outlook's default calendar.
 
     Returns:
-        Confirmation with event subject and entry_id, or an error.
+        Confirmation with event subject, entry_id and the calendar it landed
+        in, or an error.
     """
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
+
+    try:
+        cid = str(calendar_id).strip()
+        target = f" at calendar id {int(cid)}" if cid else ""
+    except ValueError:
+        return json.dumps({"error": f"Invalid calendar_id: {calendar_id!r}. Expected a number from list_calendars."})
 
     date_lines = date_var_lines("startD", start_dt) + date_var_lines("endD", end_dt)
     props = f'subject:"{escape(subject)}", start time:startD, end time:endD'
@@ -1325,10 +1537,17 @@ async def create_event(
     if all_day:
         props += ', all day flag:true'
 
-    script = f'''tell application "Microsoft Outlook"
+    script = f'''{_ISO_PRELUDE}
+tell application "Microsoft Outlook"
     {date_lines}
-    set newEvt to make new calendar event with properties {{{props}}}
-    return (id of newEvt as text) & "{DELIM}" & (subject of newEvt) & "{DELIM}" & (start time of newEvt as string) & "{DELIM}" & (end time of newEvt as string)
+    set newEvt to make new calendar event{target} with properties {{{props}}}
+    set ecalId to ""
+    set ecalName to ""
+    try
+        set ecalId to (id of (calendar of newEvt)) as text
+        set ecalName to (name of (calendar of newEvt)) as text
+    end try
+    return (id of newEvt as text) & "{DELIM}" & (subject of newEvt) & "{DELIM}" & my isoDate(start time of newEvt) & "{DELIM}" & my isoDate(end time of newEvt) & "{DELIM}" & ecalId & "{DELIM}" & ecalName
 end tell'''
 
     try:
@@ -1340,6 +1559,8 @@ end tell'''
             "subject": parts[1].strip() if len(parts) > 1 else subject,
             "start": parts[2].strip() if len(parts) > 2 else start,
             "end": parts[3].strip() if len(parts) > 3 else end,
+            "calendar_id": parts[4].strip() if len(parts) > 4 else "",
+            "calendar": _clean(parts[5]) if len(parts) > 5 else "",
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
@@ -1359,6 +1580,7 @@ async def create_meeting(
     location: str = "",
     body: str = "",
     optional_attendees: str = "",
+    calendar_id: str = "",
 ) -> str:
     """Create a meeting and send invitations to attendees.
 
@@ -1376,6 +1598,8 @@ async def create_meeting(
         body: Optional. Meeting description or agenda.
         optional_attendees: Optional. Optional attendee emails, separated
             by semicolons.
+        calendar_id: Optional. Create the meeting in this calendar, e.g. "133".
+            Get ids from list_calendars. Default: Outlook's default calendar.
 
     Returns:
         Confirmation that the meeting was created.
@@ -1390,6 +1614,12 @@ async def create_meeting(
     if body:
         props += f', content:"{escape(text_to_html(body))}"'
 
+    try:
+        cid = str(calendar_id).strip()
+        target = f" at calendar id {int(cid)}" if cid else ""
+    except ValueError:
+        return json.dumps({"error": f"Invalid calendar_id: {calendar_id!r}. Expected a number from list_calendars."})
+
     attendee_lines = ""
     for addr in required_attendees.split(";"):
         addr = addr.strip()
@@ -1403,7 +1633,7 @@ async def create_meeting(
 
     script = f'''tell application "Microsoft Outlook"
     {date_lines}
-    set newEvt to make new calendar event with properties {{{props}}}
+    set newEvt to make new calendar event{target} with properties {{{props}}}
     {attendee_lines}
     return (id of newEvt as text)
 end tell'''
@@ -1517,6 +1747,265 @@ end tell'''
 
 
 # =====================================================================
+# TOOL: move_event
+# =====================================================================
+
+@mcp.tool()
+async def move_event(entry_id: str, target_calendar_id: str) -> str:
+    """Move a calendar event to a different calendar.
+
+    REFUSES to move any event that has attendees. Outlook for Mac cannot
+    reassign an event's calendar in place, so a move is a copy followed by
+    deleting the original — and deleting a meeting sends a cancellation to
+    everyone invited, then the copy invites them again. This tool will not do
+    that to anyone. An event with attendees has to be moved by hand in Outlook,
+    or left where it is.
+
+    The copy preserves subject, times, location, body, organizer, categories
+    and recurrence (verified against Outlook for Mac 16.113). The original is
+    deleted only after the copy has been found and its subject verified, so a
+    failed copy leaves the event untouched.
+
+    Args:
+        entry_id: The numeric ID of the event to move. Get it from
+            list_events, search_events or get_event.
+        target_calendar_id: The numeric ID of the destination calendar. Get it
+            from list_calendars.
+
+    Returns:
+        JSON with the outcome: "moved" with the new entry_id, "refused" when
+        the event has attendees, "unchanged", or "failed".
+    """
+    try:
+        target = int(str(target_calendar_id).strip())
+    except ValueError:
+        return json.dumps({"error": f"Invalid target_calendar_id: {target_calendar_id!r}. Expected a number from list_calendars."})
+
+    try:
+        source_event = int(str(entry_id).strip())
+    except ValueError:
+        return json.dumps({"error": f"Invalid entry_id: {entry_id!r}. Expected a number."})
+
+    # The copy is located by id, not by the command's result: Outlook's
+    # `duplicate` returns nothing, so `set x to duplicate ...` leaves x
+    # undefined. New events get increasing ids, so the copy is the highest id in
+    # the target that was not there before — and its subject is checked against
+    # the original before anything is deleted.
+    #
+    # The two lookups are narrowed with a `whose` clause (same subject, start
+    # time within a minute) rather than walking the whole target calendar.
+    # Walking it does not scale: moving into a 2300-event calendar blew past the
+    # 120s timeout without completing a single move, while the narrowed query
+    # answers in well under a second. Date equality inside `whose` silently
+    # matches nothing in Outlook for Mac, hence the +/-60s window rather than
+    # `start time is srcStart`.
+    script = f"""tell application "Microsoft Outlook"
+    set srcEv to calendar event id {source_event}
+    set srcSubject to ""
+    try
+        set srcSubject to (subject of srcEv) as text
+    end try
+    set srcStart to missing value
+    try
+        set srcStart to start time of srcEv
+    end try
+    set srcEnd to missing value
+    try
+        set srcEnd to end time of srcEv
+    end try
+    set srcAllDay to false
+    try
+        set srcAllDay to all day flag of srcEv
+    end try
+    set srcLoc to missing value
+    try
+        set srcLoc to location of srcEv
+    end try
+    set srcContent to missing value
+    try
+        set srcContent to content of srcEv
+    end try
+    set srcCats to {{}}
+    try
+        set srcCats to category of srcEv
+    end try
+    set srcRecurring to false
+    try
+        if (recurrence of srcEv) is not missing value then set srcRecurring to true
+    end try
+    set srcCal to -1
+    try
+        set srcCal to id of (calendar of srcEv)
+    end try
+
+    set nAtt to 0
+    try
+        set nAtt to count of (attendees of srcEv)
+    end try
+    if nAtt > 0 then
+        return "REFUSED{DELIM}" & (nAtt as text) & "{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text)
+    end if
+
+    if srcCal is {target} then
+        return "NOOP{DELIM}0{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text)
+    end if
+
+    if srcStart is missing value then
+        return "NOSTART{DELIM}0{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text)
+    end if
+    set winLo to srcStart - 60
+    set winHi to srcStart + 60
+
+    set maxBefore to 0
+    try
+        repeat with e in (calendar events of calendar id {target} whose subject is srcSubject and start time is greater than or equal to winLo and start time is less than or equal to winHi)
+            set thisId to id of e
+            if thisId > maxBefore then set maxBefore to thisId
+        end repeat
+    end try
+
+    duplicate srcEv to calendar id {target}
+
+    set copyId to 0
+    try
+        repeat with e in (calendar events of calendar id {target} whose subject is srcSubject and start time is greater than or equal to winLo and start time is less than or equal to winHi)
+            set thisId to id of e
+            if thisId > maxBefore and thisId > copyId then set copyId to thisId
+        end repeat
+    end try
+
+    set methodUsed to "duplicated"
+    if copyId is 0 then
+        -- Algunos calendarios (Gmail, compartidos) ignoran `duplicate` sin dar
+        -- error: no se crea nada y no se avisa. Ahi se reconstruye el evento con
+        -- `make new`, que si funciona. Se rechaza en los recurrentes porque
+        -- reconstruir perderia la serie entera.
+        if srcRecurring then
+            return "NODUPRECUR{DELIM}0{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text)
+        end if
+        if srcEnd is missing value then
+            return "NOCOPY{DELIM}0{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text)
+        end if
+        try
+            if srcAllDay then
+                set newEv to make new calendar event at calendar id {target} with properties {{subject:srcSubject, start time:srcStart, end time:srcEnd, all day flag:true}}
+            else
+                set newEv to make new calendar event at calendar id {target} with properties {{subject:srcSubject, start time:srcStart, end time:srcEnd}}
+            end if
+            try
+                if srcLoc is not missing value then set location of newEv to srcLoc
+            end try
+            try
+                if srcContent is not missing value then set content of newEv to srcContent
+            end try
+            try
+                if (count of srcCats) > 0 then set category of newEv to srcCats
+            end try
+            set copyId to id of newEv
+            set methodUsed to "recreated"
+        on error errMsg
+            return "NOCOPY{DELIM}0{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text)
+        end try
+    end if
+    if copyId is 0 then
+        return "NOCOPY{DELIM}0{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text)
+    end if
+
+    set copySubject to ""
+    try
+        set copySubject to (subject of (calendar event id copyId of calendar id {target})) as text
+    end try
+    if copySubject is not srcSubject then
+        return "MISMATCH{DELIM}" & (copyId as text) & "{DELIM}" & copySubject & "{DELIM}" & (srcCal as text)
+    end if
+
+    delete (calendar event id {source_event} of calendar id srcCal)
+    return "MOVED{DELIM}" & (copyId as text) & "{DELIM}" & srcSubject & "{DELIM}" & (srcCal as text) & "{DELIM}" & methodUsed
+end tell"""
+
+    try:
+        raw = await bridge.run(script, timeout=_CALENDAR_TIMEOUT)
+        parts = raw.split(DELIM)
+        if len(parts) < 4:
+            return json.dumps({"error": f"Unexpected response from Outlook: {raw!r}"})
+        status = parts[0].strip()
+        detail = parts[1].strip()
+        subject = parts[2].strip()
+        src_cal = parts[3].strip()
+
+        if status == "REFUSED":
+            return json.dumps({
+                "status": "refused",
+                "reason": "event has attendees",
+                "attendees": int(detail) if detail.isdigit() else detail,
+                "subject": subject,
+                "entry_id": str(source_event),
+                "calendar_id": src_cal,
+                "detail": (
+                    "Moving would delete the original, cancelling the meeting for "
+                    "everyone invited, and then re-invite them from the copy. Move it "
+                    "by hand in Outlook if that is acceptable."
+                ),
+            }, indent=2)
+        if status == "NOOP":
+            return json.dumps({
+                "status": "unchanged",
+                "reason": "already in that calendar",
+                "subject": subject,
+                "entry_id": str(source_event),
+                "calendar_id": src_cal,
+            }, indent=2)
+        if status == "NODUPRECUR":
+            return json.dumps({
+                "status": "failed",
+                "reason": ("the target calendar silently ignores `duplicate` (Gmail and shared "
+                           "calendars do), and this event recurs, so rebuilding it would lose the "
+                           "series; nothing was changed"),
+                "subject": subject,
+                "entry_id": str(source_event),
+            }, indent=2)
+        if status == "NOSTART":
+            return json.dumps({
+                "status": "failed",
+                "reason": "the event has no readable start time, so the copy could not be located; nothing was changed",
+                "subject": subject,
+                "entry_id": str(source_event),
+            }, indent=2)
+        if status == "NOCOPY":
+            return json.dumps({
+                "status": "failed",
+                "reason": "the copy never appeared; the original was left untouched",
+                "subject": subject,
+                "entry_id": str(source_event),
+            }, indent=2)
+        if status == "MISMATCH":
+            return json.dumps({
+                "status": "failed",
+                "reason": ("the event found in the target did not match the original; the "
+                           "original was left untouched, check the target calendar"),
+                "subject": subject,
+                "entry_id": str(source_event),
+            }, indent=2)
+        method = parts[4].strip() if len(parts) > 4 else "duplicated"
+        result = {
+            "status": "moved",
+            "method": method,
+            "subject": subject,
+            "entry_id": detail,
+            "previous_entry_id": str(source_event),
+            "from_calendar_id": src_cal,
+            "to_calendar_id": str(target),
+            "note": "The event was copied and the original deleted, so its entry_id changed.",
+        }
+        if method == "recreated":
+            result["note"] += (" The target calendar ignores `duplicate`, so the event was rebuilt "
+                               "from its subject, times, all-day flag, location, body and categories.")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return f"Error moving event: {e}"
+
+
+# =====================================================================
 # TOOL 16: search_events
 # =====================================================================
 
@@ -1526,10 +2015,18 @@ async def search_events(
     start_date: str = "",
     end_date: str = "",
     count: int = 10,
+    calendar_id: str = "",
 ) -> str:
     """Search for calendar events by keyword.
 
-    Searches event subjects within a date range.
+    Searches event subjects within a date range, across every calendar of every
+    account unless calendar_id narrows it to one. Results are sorted by start
+    time and carry the same fields as list_events, including the calendar each
+    event lives in.
+
+    The same recurring-event caveat as list_events applies: the date range is
+    matched against each event's own start time, which for a series is its first
+    occurrence.
 
     Args:
         query: The search term (case-insensitive substring match on subject).
@@ -1537,62 +2034,42 @@ async def search_events(
         start_date: Start of search range in ISO 8601 format. Default: 30
             days ago.
         end_date: End of search range. Default: 30 days from now.
-        count: Maximum results to return. Default 10.
+        count: Maximum results to return, applied after sorting. Default 10.
+        calendar_id: Optional. Restrict to one calendar, e.g. "133". Get ids
+            from list_calendars. Default: all calendars.
 
     Returns:
         JSON array of matching event summaries.
     """
-    safe_query = escape(query)
+    start = datetime.fromisoformat(start_date) if start_date else datetime.now() - timedelta(days=30)
+    end = datetime.fromisoformat(end_date) if end_date else datetime.now() + timedelta(days=30)
 
-    script = f'''tell application "Microsoft Outlook"
-    set evts to calendar events whose subject contains "{safe_query}"
-    set evtCount to count of evts
-    set maxCount to {count}
-    if evtCount < maxCount then set maxCount to evtCount
+    try:
+        scope = _events_query(calendar_id, [
+            f'subject contains "{escape(query)}"',
+            "start time is greater than or equal to startD",
+            "start time is less than or equal to endD",
+        ])
+    except ValueError:
+        return json.dumps({"error": f"Invalid calendar_id: {calendar_id!r}. Expected a number from list_calendars."})
+
+    date_lines = date_var_lines("startD", start) + date_var_lines("endD", end)
+
+    script = f'''{_ISO_PRELUDE}
+tell application "Microsoft Outlook"
+    {date_lines}
+    set evts to {scope}
     set output to ""
-    repeat with i from 1 to maxCount
-        set e to item i of evts
-        set eid to id of e
-        set esubject to subject of e
-        set estart to start time of e as string
-        set eend to end time of e as string
-        set elocation to ""
-        try
-            set elocation to location of e
-        end try
-        set eorganizer to ""
-        try
-            set eorganizer to organizer of e
-        end try
-        set eallday to all day flag of e
-        set output to output & (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
-    end repeat
+    repeat with e in evts
+{_event_record_script("e")}    end repeat
     return output
 end tell'''
 
     try:
-        raw = await bridge.run(script)
+        raw = await bridge.run(script, timeout=_CALENDAR_TIMEOUT)
         if not raw:
             return json.dumps([])
-
-        results = []
-        for record in raw.split(RECORD_DELIM):
-            record = record.strip()
-            if not record:
-                continue
-            parts = record.split(DELIM)
-            if len(parts) < 7:
-                continue
-            results.append({
-                "entry_id": parts[0].strip(),
-                "subject": parts[1].strip() or "(no subject)",
-                "start": parts[2].strip(),
-                "end": parts[3].strip(),
-                "location": _clean(parts[4]),
-                "organizer": _clean(parts[5]),
-                "all_day": parts[6].strip().lower() == "true",
-            })
-        return json.dumps(results, indent=2, default=str)
+        return json.dumps(_parse_event_records(raw)[:count], indent=2, default=str)
     except Exception as e:
         return f"Error searching events: {e}"
 

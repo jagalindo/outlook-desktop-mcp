@@ -301,6 +301,160 @@ async def main():
     check("create_event emits the date-builder lines",
           "set year of startD to 2026" in scr and "set year of endD to 2026" in scr)
 
+    # --- 12. calendars -------------------------------------------------------
+    # list_calendars: parse id/name/account/count, including a calendar Outlook
+    # attributes to no account (shared/subscribed ones report an empty account).
+    fake.response = (rec("133", "Docencia", "jagalindo@us.es", "212")
+                     + rec("205", "malawito@gmail.com", "", "2330"))
+    cals = json.loads(await s.list_calendars())
+    check("list_calendars parses id/name/account/count",
+          len(cals) == 2 and cals[0]["calendar_id"] == "133"
+          and cals[0]["name"] == "Docencia"
+          and cals[0]["account"] == "jagalindo@us.es"
+          and cals[0]["event_count"] == 212, detail=f"got {cals}")
+    check("list_calendars leaves an unattributed calendar's account empty",
+          cals[1]["account"] == "" and cals[1]["event_count"] == 2330, detail=f"got {cals}")
+    check("list_calendars skips the nameless account roots",
+          "if cname is not missing value then" in fake.last_script)
+
+    # A full event record as the AppleScript side builds it.
+    def evrec(eid, subject, start, end, cal_id="132", cal="Diverso", rec_flag="false"):
+        return rec(eid, subject, start, end, "missing value", "jagalindo@us.es",
+                   "false", cal_id, cal, rec_flag)
+
+    # list_events: scoping to one calendar
+    fake.response = evrec("1", "A", "2026-09-10T10:00:00", "2026-09-10T11:00:00")
+    await s.list_events(start_date="2026-09-01", end_date="2026-09-30", calendar_id="133")
+    scr = fake.last_script
+    check("list_events with calendar_id scopes to that calendar",
+          "calendar events of calendar id 133 whose" in scr)
+    check("list_events filters by date in AppleScript, not by overfetching",
+          "start time is greater than or equal to startD" in scr
+          and "start time is less than or equal to endD" in scr)
+    check("list_events builds bounds with locale-independent date vars",
+          "set year of startD to 2026" in scr and 'date "' not in scr)
+    check("list_events emits the ISO date handlers",
+          "on isoDate(d)" in scr and "my isoDate(start time of e)" in scr)
+
+    # list_events: no calendar_id spans every calendar
+    await s.list_events(start_date="2026-09-01", end_date="2026-09-30")
+    check("list_events without calendar_id spans all calendars",
+          "set evts to (calendar events whose" in fake.last_script)
+
+    # list_events: sorting by start time and the count limit
+    fake.response = (evrec("3", "C", "2026-09-30T09:00:00", "2026-09-30T10:00:00")
+                     + evrec("1", "A", "2026-09-10T09:00:00", "2026-09-10T10:00:00")
+                     + evrec("2", "B", "2026-09-20T09:00:00", "2026-09-20T10:00:00"))
+    evs = json.loads(await s.list_events(start_date="2026-09-01", end_date="2026-09-30"))
+    check("list_events sorts by start time",
+          [e["subject"] for e in evs] == ["A", "B", "C"], detail=f"got {evs}")
+    evs = json.loads(await s.list_events(start_date="2026-09-01", end_date="2026-09-30", count=2))
+    check("list_events applies count after sorting, keeping the earliest",
+          [e["subject"] for e in evs] == ["A", "B"], detail=f"got {evs}")
+
+    # list_events: the new per-event fields
+    fake.response = evrec("7", "Clase", "2026-09-10T10:00:00", "2026-09-10T11:00:00",
+                          cal_id="133", cal="Docencia", rec_flag="true")
+    evs = json.loads(await s.list_events(start_date="2026-09-01", end_date="2026-09-30"))
+    check("list_events reports each event's calendar and recurrence",
+          evs[0]["calendar_id"] == "133" and evs[0]["calendar"] == "Docencia"
+          and evs[0]["is_recurring"] is True, detail=f"got {evs}")
+    check("list_events blanks a 'missing value' location",
+          evs[0]["location"] == "", detail=f"got {evs}")
+
+    # search_events: subject and date clauses, scoped
+    fake.response = evrec("1", "Reunión", "2026-09-10T10:00:00", "2026-09-10T11:00:00")
+    await s.search_events(query="reuni", start_date="2026-09-01", end_date="2026-09-30",
+                          calendar_id="132")
+    scr = fake.last_script
+    check("search_events combines subject and date filters on one calendar",
+          'calendar events of calendar id 132 whose subject contains "reuni"' in scr
+          and "start time is greater than or equal to startD" in scr)
+
+    # invalid calendar_id is rejected before any script runs
+    for tool, kwargs in (
+        (s.list_events, {}),
+        (s.search_events, {"query": "x"}),
+        (s.create_event, {"subject": "S", "start": "2026-09-10 10:00", "end": "2026-09-10 11:00"}),
+    ):
+        fake.calls = 0
+        out = json.loads(await tool(calendar_id="133; do shell script \"boom\"", **kwargs))
+        check(f"{tool.__name__} rejects a non-numeric calendar_id without running a script",
+              "error" in out and fake.calls == 0, detail=f"got {out}")
+
+    # create_event: target calendar
+    fake.response = DELIM.join(["99", "S", "2026-09-10T10:00:00", "2026-09-10T11:00:00",
+                                "135", "Tutorías"])
+    out = json.loads(await s.create_event(subject="S", start="2026-09-10 10:00",
+                                          end="2026-09-10 11:00", calendar_id="135"))
+    check("create_event targets the requested calendar",
+          "make new calendar event at calendar id 135 with properties" in fake.last_script)
+    check("create_event reports the calendar the event landed in",
+          out["calendar_id"] == "135" and out["calendar"] == "Tutorías", detail=f"got {out}")
+    await s.create_event(subject="S", start="2026-09-10 10:00", end="2026-09-10 11:00")
+    check("create_event without calendar_id uses the default calendar",
+          "make new calendar event with properties" in fake.last_script)
+
+    # get_event: calendar and recurrence
+    fake.response = DELIM.join(["7", "Clase", "2026-09-10T10:00:00", "2026-09-10T11:00:00",
+                                "Aula F0.10", "jagalindo@us.es", "false", "cuerpo",
+                                "a@b.com; ", "133", "Docencia", "true"])
+    got = json.loads(await s.get_event("7"))
+    check("get_event reports the calendar and recurrence",
+          got["calendar_id"] == "133" and got["calendar"] == "Docencia"
+          and got["is_recurring"] is True and got["start"] == "2026-09-10T10:00:00",
+          detail=f"got {got}")
+
+    # --- 13. move_event ------------------------------------------------------
+    # The guard: an event with attendees must never be copied or deleted.
+    fake.response = DELIM.join(["REFUSED", "3", "Reunión con el comité", "133"])
+    out = json.loads(await s.move_event("14000", "135"))
+    check("move_event refuses an event that has attendees",
+          out["status"] == "refused" and out["attendees"] == 3, detail=f"got {out}")
+    check("move_event asks Outlook for the attendee count before anything else",
+          "count of (attendees of srcEv)" in fake.last_script)
+    check("move_event returns before duplicating when there are attendees",
+          fake.last_script.index("if nAtt > 0 then")
+          < fake.last_script.index("duplicate srcEv"))
+
+    # The original is only deleted after the copy is found and verified.
+    scr = fake.last_script
+    check("move_event verifies the copy's subject before deleting the original",
+          scr.index("if copySubject is not srcSubject then") < scr.index("delete (calendar event id"))
+    check("move_event bails out when no copy appeared",
+          scr.index("if copyId is 0 then") < scr.index("delete (calendar event id"))
+    check("move_event deletes the original by explicit id, not a loop reference",
+          "delete (calendar event id 14000 of calendar id srcCal)" in scr)
+
+    fake.response = DELIM.join(["MOVED", "14915", "Clase IISSI2", "133"])
+    out = json.loads(await s.move_event("14000", "135"))
+    check("move_event reports the new entry_id after a move",
+          out["status"] == "moved" and out["entry_id"] == "14915"
+          and out["previous_entry_id"] == "14000"
+          and out["to_calendar_id"] == "135", detail=f"got {out}")
+
+    fake.response = DELIM.join(["NOOP", "0", "Clase", "135"])
+    out = json.loads(await s.move_event("14000", "135"))
+    check("move_event is a no-op when the event is already in the target",
+          out["status"] == "unchanged", detail=f"got {out}")
+
+    fake.response = DELIM.join(["NOCOPY", "0", "Clase", "133"])
+    out = json.loads(await s.move_event("14000", "135"))
+    check("move_event reports failure, not success, when the copy never appeared",
+          out["status"] == "failed" and "untouched" in out["reason"], detail=f"got {out}")
+
+    fake.response = DELIM.join(["MISMATCH", "99", "Otro evento", "133"])
+    out = json.loads(await s.move_event("14000", "135"))
+    check("move_event reports failure when the copy does not match the original",
+          out["status"] == "failed", detail=f"got {out}")
+
+    for bad_kwargs in ({"entry_id": "14000", "target_calendar_id": "135; delete"},
+                       {"entry_id": "no", "target_calendar_id": "135"}):
+        fake.calls = 0
+        out = json.loads(await s.move_event(**bad_kwargs))
+        check(f"move_event rejects {bad_kwargs} without running a script",
+              "error" in out and fake.calls == 0, detail=f"got {out}")
+
     print(f"\n{passed}/{total} unit checks passed")
     return 0 if passed == total else 1
 

@@ -131,15 +131,40 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 
 | Tool | Windows | macOS | Description |
 |------|:-------:|:-----:|-------------|
-| `list_events` | yes | yes | List upcoming events within a date range |
+| `list_calendars` | no | yes | List every calendar across all accounts, with id, account and event count |
+| `list_events` | yes | yes | List events within a date range, optionally scoped to one calendar |
 | `get_event` | yes | yes | Read full event details by entry ID |
-| `create_event` | yes | yes | Create a personal calendar appointment |
+| `create_event` | yes | yes | Create a personal calendar appointment, optionally in a chosen calendar |
 | `create_meeting` | yes | yes | Create a meeting and send invitations to attendees |
 | `update_event` | yes | yes | Modify an existing event's subject, time, location, etc. |
 | `delete_event` | yes | yes | Delete an appointment or cancel a meeting |
 | `respond_to_meeting` | yes | yes | Accept, decline, or tentatively accept a meeting invite |
-| `search_events` | yes | yes | Search calendar events by keyword within a date range |
+| `move_event` | no | yes | Move an event to another calendar — refuses any event that has attendees |
+| `search_events` | yes | yes | Search calendar events by keyword, optionally scoped to one calendar |
 
+> **macOS note — multiple calendars:** an Outlook profile usually holds many
+> calendars spread over several accounts, and their names are **not unique**
+> (two accounts can each have a "Calendar"). Call `list_calendars` and pass the
+> numeric `calendar_id` to `list_events`, `search_events` and `create_event`;
+> every event returned also reports the `calendar` it lives in. Omitting
+> `calendar_id` spans every calendar of every account, which on a large profile
+> can take tens of seconds.
+>
+> **macOS note — moving events:** Outlook for Mac cannot reassign an event's
+> calendar in place (`set calendar of <event>` fails), so `move_event` copies
+> the event and deletes the original. Because deleting a meeting cancels it for
+> everyone invited and the copy then re-invites them, **`move_event` refuses any
+> event with attendees** and there is no override flag. The copy preserves
+> subject, times, location, body, organizer, categories and recurrence; the
+> original is deleted only after the copy is found and verified, and the event's
+> `entry_id` changes as a result.
+>
+> > **macOS note — recurring events:** the date range is matched against each
+> event's own start time, which for a recurring series is its *first*
+> occurrence. An ongoing series that began before `start_date` is therefore not
+> listed even though it still has occurrences in the range. Events that do
+> appear are flagged with `is_recurring`.
+>
 > **macOS note:** `respond_to_meeting` acts on the meeting **invite message** in your mailbox, so its `entry_id` is that message's id (not a calendar event id). It also accepts `send_response` (default true) and an optional `comment` to the organizer.
 
 ### Tasks
