@@ -197,22 +197,26 @@ async def main():
             + rec("4", "NoDue", "missing value", "not completed", "priority normal")
         )
 
-    fake.response = _tasks_payload()
-    out = json.loads(await s.list_tasks(due_start="2026-03-10"))
-    subs = [t["subject"] for t in out]
-    check("list_tasks due_start excludes earlier and undated tasks",
-          subs == ["Mid", "Late"], detail=subs)
+    # The due filter runs inside Outlook's `whose` clause, so it sees every task
+    # rather than only the first few fetched.
+    fake.response = ""
+    await s.list_tasks(due_start="2026-03-10")
+    scr = fake.last_script
+    check("list_tasks due_start filters in AppleScript",
+          "due date is greater than or equal to dueStartD" in scr
+          and "set day of dueStartD to 10" in scr, detail=scr)
 
-    fake.response = _tasks_payload()
-    out = json.loads(await s.list_tasks(due_end="2026-03-20"))
-    subs = [t["subject"] for t in out]
-    check("list_tasks due_end excludes later and undated tasks",
-          subs == ["Early", "Mid"], detail=subs)
+    await s.list_tasks(due_end="2026-03-20")
+    scr = fake.last_script
+    check("list_tasks due_end is inclusive of the whole day",
+          "due date is less than or equal to dueEndD" in scr
+          and f"set time of dueEndD to {23*3600 + 59*60 + 59}" in scr, detail=scr)
 
-    fake.response = _tasks_payload()
-    out = json.loads(await s.list_tasks(due_start="2026-03-10", due_end="2026-03-20"))
-    subs = [t["subject"] for t in out]
-    check("list_tasks due range keeps only in-window task", subs == ["Mid"], detail=subs)
+    await s.list_tasks(due_start="2026-03-10", due_end="2026-03-20", include_completed=True)
+    scr = fake.last_script
+    check("list_tasks due range combines both bounds without the completion filter",
+          "(tasks whose due date is greater than or equal to dueStartD and due date is less than or equal to dueEndD)" in scr,
+          detail=scr)
 
     fake.response = _tasks_payload()
     out = json.loads(await s.list_tasks())

@@ -1,5 +1,4 @@
 """Helpers for building and parsing AppleScript safely."""
-import re
 from datetime import datetime
 
 
@@ -48,22 +47,6 @@ def text_to_html(text: str, wrap: bool = True) -> str:
     return f"<html><body>{html}</body></html>" if wrap else html
 
 
-def format_date(dt: datetime) -> str:
-    """Convert a Python datetime to an AppleScript date string.
-
-    Returns a string like: date "Sunday, March 22, 2026 at 2:00:00 PM"
-    AppleScript parses dates based on the system locale, so we use a
-    locale-friendly format that osascript can interpret.
-
-    DEPRECATED for building dates to assign to Outlook items: AppleScript's
-    ``date "..."`` coercion is locale-dependent and misreads this ISO string
-    on non-US systems (e.g. a Spanish-locale Mac parses "2026-07-03" into a
-    wildly wrong date). Use ``date_var_lines`` instead, which builds the date
-    from numeric components. This is kept only for backwards compatibility.
-    """
-    return f'date "{dt.strftime("%Y-%m-%d %H:%M:%S")}"'
-
-
 def date_var_lines(var: str, dt: datetime) -> str:
     """Return AppleScript statements assigning a locale-independent date to `var`.
 
@@ -94,34 +77,6 @@ def date_var_lines(var: str, dt: datetime) -> str:
         f'set day of {var} to {dt.day}\n'
         f'set time of {var} to {secs}\n'
     )
-
-
-def parse_date(text: str) -> str:
-    """Parse an AppleScript date string to ISO 8601 format.
-
-    AppleScript dates look like: "Sunday, March 22, 2026 at 2:00:00 PM"
-    or various locale-specific formats. We attempt several common patterns.
-    """
-    text = text.strip()
-    # Remove day name prefix if present (e.g., "Sunday, ")
-    text = re.sub(r"^\w+day,\s*", "", text)
-    # Remove " at " between date and time
-    text = text.replace(" at ", " ")
-    # Try common formats
-    for fmt in (
-        "%B %d, %Y %I:%M:%S %p",   # March 22, 2026 2:00:00 PM
-        "%d. %B %Y %H:%M:%S",       # 22. mars 2026 14:00:00 (Norwegian)
-        "%Y-%m-%d %H:%M:%S",        # 2026-03-22 14:00:00
-        "%d/%m/%Y %H:%M:%S",        # 22/03/2026 14:00:00
-        "%m/%d/%Y %H:%M:%S",        # 03/22/2026 14:00:00
-    ):
-        try:
-            dt = datetime.strptime(text, fmt)
-            return dt.isoformat()
-        except ValueError:
-            continue
-    # Fallback: return as-is
-    return text
 
 
 # Locale-independent AppleScript folder keywords
@@ -158,7 +113,8 @@ def resolve_folder_ref(folder_name: str) -> str:
 # effectively never occur in email, calendar, or task content — unlike the old
 # "|||" / "===" which could appear in message bodies, subjects, or signatures
 # and silently corrupt field parsing. They survive an `osascript -e` round-trip
-# unchanged, and str.strip() only trims them at the very ends of the output
-# (harmless, since empty records are filtered out during parsing).
+# unchanged. Python's str.strip() counts both as whitespace, though, so output
+# must never be stripped before it is split: an empty trailing field would
+# vanish along with its delimiter.
 DELIM = "\x1f"          # ASCII 31, Unit Separator — between fields
 RECORD_DELIM = "\x1e"   # ASCII 30, Record Separator — between records
