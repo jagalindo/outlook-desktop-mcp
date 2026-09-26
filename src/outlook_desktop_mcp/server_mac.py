@@ -56,6 +56,9 @@ mcp = FastMCP(
         "PREREQUISITE: Microsoft Outlook for Mac must be running.\n\n"
         "NOTE: entry_id values on macOS are numeric IDs (not hex strings like "
         "on Windows). They identify items within their folder context.\n\n"
+        "Every tool returns JSON. A failure is an object with an \"error\" "
+        "message and a \"code\" such as invalid_argument, not_found, "
+        "permission_denied or timeout.\n\n"
         "AVAILABLE TOOL CATEGORIES:\n"
         "- Email: send, draft, list, read, search, reply, forward, mark "
         "read/unread, move, snooze/unsnooze (follow-up flag + reminder)\n"
@@ -432,6 +435,35 @@ def _attachment_lines(paths: list[str] | None, target: str) -> str:
     return lines
 
 
+def _compose_script(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str,
+    bcc: str,
+    html_body: str,
+    attachments: list[str] | None,
+    finish: str,
+) -> str:
+    """AppleScript that builds an outgoing message as `newMsg`, then runs
+    `finish` (e.g. "send newMsg")."""
+    recipients = (
+        _recipient_lines(to, "to recipient")
+        + _recipient_lines(cc, "cc recipient")
+        + _recipient_lines(bcc, "bcc recipient")
+    )
+    att_lines = _attachment_lines(attachments, "newMsg")
+    # `content` is Outlook's HTML body property, so a plain-text body has to be
+    # converted to HTML or its line breaks collapse. (There is no `html content`
+    # property — naming it is an AppleScript syntax error.)
+    content_prop = f'content:"{escape(html_body or text_to_html(body))}"'
+    return f'''tell application "Microsoft Outlook"
+    set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
+    {recipients}{att_lines}
+    {finish}
+end tell'''
+
+
 # --- UI Scraping for New Outlook for Mac ---
 # New Outlook for Mac stores Exchange/M365 mailbox data in the cloud and
 # does NOT expose it through the AppleScript `inbox` keyword (which only
@@ -600,27 +632,14 @@ async def send_email(
         attachments: Optional. A list of absolute file paths to attach.
 
     Returns:
-        A confirmation message with subject and recipients, or an error.
+        JSON with status "sent", subject and recipients, or an error.
     """
-    to_lines = _recipient_lines(to, "to recipient")
-    cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
-    bcc_lines = _recipient_lines(bcc, "bcc recipient") if bcc else ""
-
-    att_lines = _attachment_lines(attachments, "newMsg")
-
-    # `content` is Outlook's HTML body property, so a plain-text body has to be
-    # converted to HTML or its line breaks collapse. (There is no `html content`
-    # property — naming it is an AppleScript syntax error.)
-    content_prop = f'content:"{escape(html_body or text_to_html(body))}"'
-
-    script = f'''tell application "Microsoft Outlook"
-    set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
-    {to_lines}{cc_lines}{bcc_lines}{att_lines}
-    send newMsg
-end tell'''
-
+    script = _compose_script(
+        to, subject, body, cc, bcc, html_body, attachments,
+        finish="send newMsg",
+    )
     await bridge.run(script)
-    return f"Email sent: '{subject}' to {to}"
+    return json.dumps({"status": "sent", "subject": subject, "to": to}, indent=2)
 
 
 # =====================================================================
@@ -656,25 +675,13 @@ async def create_draft(
     Returns:
         JSON with the draft's entry_id and subject, or an error.
     """
-    to_lines = _recipient_lines(to, "to recipient")
-    cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
-    bcc_lines = _recipient_lines(bcc, "bcc recipient") if bcc else ""
-
-    att_lines = _attachment_lines(attachments, "newMsg")
-
-    # `content` is Outlook's HTML body property, so a plain-text body has to be
-    # converted to HTML or its line breaks collapse. (There is no `html content`
-    # property — naming it is an AppleScript syntax error.)
-    content_prop = f'content:"{escape(html_body or text_to_html(body))}"'
-
     # No explicit `save`: Outlook's AppleScript `save` verb demands an
     # `in <file>` parameter for outgoing messages and fails with -1701.
     # `make new outgoing message` already persists the item to Drafts.
-    script = f'''tell application "Microsoft Outlook"
-    set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
-    {to_lines}{cc_lines}{bcc_lines}{att_lines}
-    return (id of newMsg as text) & "{DELIM}" & (subject of newMsg)
-end tell'''
+    script = _compose_script(
+        to, subject, body, cc, bcc, html_body, attachments,
+        finish=f'return (id of newMsg as text) & "{DELIM}" & (subject of newMsg)',
+    )
 
     raw = await bridge.run(script)
     parts = raw.split(DELIM)
@@ -829,7 +836,7 @@ async def mark_as_read(entry_id: str) -> str:
             or search_emails results.
 
     Returns:
-        Confirmation message with the email subject, or an error.
+        JSON with status "read", entry_id and subject, or an error.
     """
     script = f'''tell application "Microsoft Outlook"
     set m to message id {_item_id(entry_id)}
@@ -838,7 +845,7 @@ async def mark_as_read(entry_id: str) -> str:
 end tell'''
 
     subject = await bridge.run(script)
-    return f"Marked as read: '{subject}'"
+    return json.dumps({"status": "read", "entry_id": entry_id.strip(), "subject": subject}, indent=2)
 
 
 # =====================================================================
@@ -858,7 +865,7 @@ async def mark_as_unread(entry_id: str) -> str:
             or search_emails results.
 
     Returns:
-        Confirmation message with the email subject, or an error.
+        JSON with status "unread", entry_id and subject, or an error.
     """
     script = f'''tell application "Microsoft Outlook"
     set m to message id {_item_id(entry_id)}
@@ -867,7 +874,7 @@ async def mark_as_unread(entry_id: str) -> str:
 end tell'''
 
     subject = await bridge.run(script)
-    return f"Marked as unread: '{subject}'"
+    return json.dumps({"status": "unread", "entry_id": entry_id.strip(), "subject": subject}, indent=2)
 
 
 # =====================================================================
@@ -1057,7 +1064,7 @@ async def reply_email(
         attachments: Optional. A list of absolute file paths to attach.
 
     Returns:
-        Confirmation indicating the reply was sent, or an error.
+        JSON with status "sent", the replied-to entry_id and subject, or an error.
     """
     att_lines = _attachment_lines(attachments, "replyMsg")
 
@@ -1072,7 +1079,12 @@ async def reply_email(
 end tell'''
 
     subject = await bridge.run(script)
-    return f"Reply sent to '{subject}' (reply_all={reply_all})"
+    return json.dumps({
+        "status": "sent",
+        "in_reply_to": entry_id.strip(),
+        "subject": subject,
+        "reply_all": reply_all,
+    }, indent=2)
 
 
 # =====================================================================
@@ -1101,7 +1113,7 @@ async def forward_email(
         attachments: Optional. Additional absolute file paths to attach.
 
     Returns:
-        Confirmation indicating the message was forwarded, or an error.
+        JSON with status "forwarded", entry_id, subject and recipients, or an error.
     """
     to_lines = _recipient_lines(to, "to recipient")
     cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
@@ -1125,7 +1137,12 @@ async def forward_email(
 end tell'''
 
     subject = await bridge.run(script)
-    return f"Email forwarded: '{subject}' to {to}"
+    return json.dumps({
+        "status": "forwarded",
+        "entry_id": entry_id.strip(),
+        "subject": subject,
+        "to": to,
+    }, indent=2)
 
 
 # =====================================================================
@@ -1703,7 +1720,7 @@ async def create_event(
             Get ids from list_calendars. Default: Outlook's default calendar.
 
     Returns:
-        Confirmation with event subject, entry_id and the calendar it landed
+        JSON with entry_id, subject, times and the calendar the event landed
         in, or an error.
     """
     script = _new_event_script(
@@ -1811,7 +1828,7 @@ async def update_event(
             leave it as it is.
 
     Returns:
-        Confirmation with updated event details, or an error.
+        JSON with the updated event fields, or an error.
     """
     set_lines = ""
     # The all-day flag is written before the times: clearing it on an all-day
@@ -1885,7 +1902,7 @@ async def delete_event(entry_id: str) -> str:
         entry_id: The numeric ID of the event to delete.
 
     Returns:
-        Confirmation with the event subject, or an error.
+        JSON with status "deleted", entry_id and subject, or an error.
     """
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {_item_id(entry_id)}
@@ -1895,7 +1912,7 @@ async def delete_event(entry_id: str) -> str:
 end tell'''
 
     subject = await bridge.run(script)
-    return f"Event deleted: '{subject}'"
+    return json.dumps({"status": "deleted", "entry_id": entry_id.strip(), "subject": subject}, indent=2)
 
 
 # =====================================================================
@@ -2263,7 +2280,7 @@ async def respond_to_meeting(
             organizer). Ignored when send_response is false.
 
     Returns:
-        Confirmation of your response, or an error.
+        JSON with the response given and whether it was sent, or an error.
     """
     resp = response.lower().strip()
     verb = _MEETING_RESPONSE_VERB.get(resp)
@@ -2281,7 +2298,13 @@ async def respond_to_meeting(
 end tell'''
 
     subj = await bridge.run(script)
-    return f"Responded '{resp}' to meeting: '{subj}'"
+    return json.dumps({
+        "status": "responded",
+        "response": resp,
+        "response_sent": send_response,
+        "entry_id": entry_id.strip(),
+        "subject": subj,
+    }, indent=2)
 
 
 # =====================================================================
@@ -2530,7 +2553,7 @@ async def complete_task(entry_id: str) -> str:
         entry_id: The numeric ID of the task.
 
     Returns:
-        Confirmation with the task subject.
+        JSON with status "completed", entry_id and subject, or an error.
     """
     script = f'''tell application "Microsoft Outlook"
     set t to task id {_item_id(entry_id)}
@@ -2539,7 +2562,7 @@ async def complete_task(entry_id: str) -> str:
 end tell'''
 
     name = await bridge.run(script)
-    return f"Task completed: '{name}'"
+    return json.dumps({"status": "completed", "entry_id": entry_id.strip(), "subject": name}, indent=2)
 
 
 @mcp.tool()
@@ -2551,7 +2574,7 @@ async def delete_task(entry_id: str) -> str:
         entry_id: The numeric ID of the task to delete.
 
     Returns:
-        Confirmation with the task subject.
+        JSON with status "deleted", entry_id and subject, or an error.
     """
     script = f'''tell application "Microsoft Outlook"
     set t to task id {_item_id(entry_id)}
@@ -2561,7 +2584,7 @@ async def delete_task(entry_id: str) -> str:
 end tell'''
 
     name = await bridge.run(script)
-    return f"Task deleted: '{name}'"
+    return json.dumps({"status": "deleted", "entry_id": entry_id.strip(), "subject": name}, indent=2)
 
 
 # =====================================================================
@@ -2629,7 +2652,7 @@ async def set_category(entry_id: str, categories: str, item_type: str) -> str:
             or "event".
 
     Returns:
-        Confirmation with the item name and applied categories, or an error.
+        JSON with the item name and the categories applied, or an error.
     """
     ref = _ITEM_REF.get(item_type.lower().strip())
     if ref is None:
@@ -2665,8 +2688,13 @@ async def set_category(entry_id: str, categories: str, item_type: str) -> str:
 end tell'''
 
     name = await bridge.run(script)
-    applied = ", ".join(names) if names else "(none)"
-    return f"Categories set on '{name}': {applied}"
+    return json.dumps({
+        "status": "categorized",
+        "entry_id": entry_id.strip(),
+        "item_type": item_type.lower().strip(),
+        "name": name,
+        "categories": names,
+    }, indent=2)
 
 
 # =====================================================================
