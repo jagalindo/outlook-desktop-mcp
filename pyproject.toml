@@ -1,6 +1,6 @@
 [project]
 name = "outlook-desktop-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "Outlook Desktop as an MCP server — Windows (COM) and macOS (AppleScript). No Graph API, no Entra app registration — just your local Outlook."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -16,17 +16,23 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Email",
     "Topic :: Office/Business :: Office Suites",
 ]
 dependencies = [
     "pywin32>=310; sys_platform == 'win32'",
-    # mcp 2.0 removed mcp.server.fastmcp, which both servers import.
-    "mcp[cli]>=1.26.0,<2",
+    # mcp 2.0 removed mcp.server.fastmcp, which both servers import. The
+    # [cli] extra is not needed at runtime and pulls in cryptography, which
+    # has no wheel on some platforms (Windows ARM64).
+    "mcp>=1.26.0,<2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The `mcp dev` / `mcp inspector` developer tools.
+cli = ["mcp[cli]>=1.26.0,<2"]
 
 [project.urls]
 Homepage = "https://github.com/aaanerud/outlook-desktop-mcp"

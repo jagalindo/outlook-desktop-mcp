@@ -5,7 +5,7 @@ Exposes Microsoft Outlook Desktop (Classic) as an MCP server over stdio.
 Uses COM automation — no Microsoft Graph, no Entra app registration.
 Just run this on Windows with Outlook open and you have a full email MCP server.
 
-Entry point: python -m outlook_desktop_mcp.server
+Entry point: python -m outlook_desktop_mcp (auto-detected on Windows)
 """
 import sys
 import json

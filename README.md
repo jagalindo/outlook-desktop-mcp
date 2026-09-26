@@ -38,8 +38,8 @@ When the server starts, it checks which operating system it is running on and ta
               ┌───────┴────────┐    ┌────────┴────────┐
               │  server.py     │    │  server_mac.py   │
               │  COM Bridge    │    │  AppleScript     │
-              │  (29 tools)    │    │  Bridge          │
-              │                │    │  (22 tools)      │
+              │  (34 tools)    │    │  Bridge          │
+              │                │    │  (34 tools)      │
               └───────┬────────┘    └────────┬─────────┘
                       |                      |
               OUTLOOK.EXE via         Microsoft Outlook
@@ -54,9 +54,9 @@ When the server starts, it checks which operating system it is running on and ta
 
 Windows Outlook (Classic) exposes a rich COM automation interface — the Outlook Object Model (`MSOUTL.OLB`). This has been the standard way to programmatically control Outlook on Windows for over 20 years. It provides deep access to mail rules, categories, MAPI properties, and the full folder hierarchy.
 
-Mac Outlook does not support COM. Instead, it exposes an AppleScript dictionary that can be driven via the `osascript` command. The AppleScript interface covers the core operations — email, calendar, tasks — but does not expose rules, categories, or certain advanced MAPI features. This is a limitation of what Microsoft chose to include in Outlook for Mac's scripting dictionary, not a limitation of this project.
+Mac Outlook does not support COM. Instead, it exposes an AppleScript dictionary that can be driven via the `osascript` command. The AppleScript interface covers the core operations — email, calendar, tasks, categories — but does not expose mail rules, Out of Office, or certain advanced MAPI features. This is a limitation of what Microsoft chose to include in Outlook for Mac's scripting dictionary, not a limitation of this project.
 
-The server is structured as two parallel implementations with identical tool names and signatures, so MCP clients see the same interface regardless of platform. Tools that are not available on a given platform are simply not registered.
+The server is structured as two parallel implementations. 30 tools are shared under the same names, and each platform registers 4 more that only it can support (see the tables below). Shared tools mostly take the same parameters, but each side has a few extras the other lacks — for example `account` on Windows and `calendar_id` on macOS — so check a tool's schema rather than assuming the two are identical.
 
 ## Requirements
 
@@ -125,7 +125,7 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 | `move_email` | yes | yes | Move an email to Archive, Trash, or any folder |
 | `snooze_email` | no | yes | Postpone an email: follow-up flag + Outlook reminder at a chosen time, optionally moving it to a snooze folder |
 | `unsnooze_email` | no | yes | Clear the follow-up flag and reminder, optionally moving the email back to the inbox |
-| `list_folders` | yes | yes | Browse the folder hierarchy with item counts |
+| `list_folders` | yes | yes | Browse the folder hierarchy with item counts (on macOS also each folder's id, path, depth and account) |
 
 ### Calendar
 
@@ -159,13 +159,15 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 > original is deleted only after the copy is found and verified, and the event's
 > `entry_id` changes as a result.
 >
-> > **macOS note — recurring events:** the date range is matched against each
+> **macOS note — recurring events:** the date range is matched against each
 > event's own start time, which for a recurring series is its *first*
 > occurrence. An ongoing series that began before `start_date` is therefore not
 > listed even though it still has occurrences in the range. Events that do
 > appear are flagged with `is_recurring`.
 >
 > **macOS note:** `respond_to_meeting` acts on the meeting **invite message** in your mailbox, so its `entry_id` is that message's id (not a calendar event id). It also accepts `send_response` (default true) and an optional `comment` to the organizer.
+>
+> **macOS note:** `create_meeting` sends the invitations with Outlook's `send meeting` command. Pass `send_invites=false` to save the meeting with its attendees without notifying anyone, then review and send it from Outlook.
 
 ### Tasks
 
@@ -205,7 +207,29 @@ These tools rely on COM-specific APIs (the Rules object model and MAPI property 
 | `toggle_rule` | yes | — | Enable or disable a mail rule by name |
 | `get_out_of_office` | yes | — | Check whether Out of Office auto-reply is on or off |
 
-**Total: 34 tools on Windows, 30 tools on macOS.**
+### Accounts (Windows only)
+
+| Tool | Windows | macOS | Description |
+|------|:-------:|:-----:|-------------|
+| `list_accounts` | yes | — | List the Outlook accounts (stores) in the profile |
+
+> **Windows note:** most tools accept an optional `account` argument (the
+> account's display name or a substring of it) to act on a store other than the
+> primary one. Use `list_accounts` to see the names. On macOS, calendars are
+> addressed with `calendar_id` from `list_calendars` instead.
+
+**Total: 34 tools on each platform — 30 shared, 4 Windows-only, 4 macOS-only.**
+
+### Results and errors (macOS)
+
+Every macOS tool returns JSON. Successful calls carry a `status` (such as
+`sent`, `created`, `moved`) and the item's `entry_id`; failures return
+`{"error": "...", "code": "..."}`, where `code` is one of `invalid_argument`,
+`not_found`, `permission_denied`, `timeout`, `outlook_not_running`,
+`applescript_error`, `parse_error` or `unexpected`. Dates are returned as ISO
+8601 regardless of the Mac's language. A `timeout` on a tool that changes
+something means the change may still have gone through, so check before
+retrying.
 
 ## Architecture Details
 
@@ -254,7 +278,7 @@ git clone https://github.com/Aanerud/outlook-desktop-mcp.git
 cd outlook-desktop-mcp
 python -m venv .venv
 .venv\Scripts\activate
-pip install pywin32 "mcp[cli]" -e .
+pip install -e .
 python .venv\Scripts\pywin32_postinstall.py -install
 ```
 
@@ -266,7 +290,7 @@ claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook
 
 ### Windows (ARM64)
 
-The `[cli]` extra of `mcp` transitively pulls in `cryptography`, and pip's default resolver may pick a version that lacks a `win_arm64` wheel — which then fails to build because it requires a Rust toolchain plus OpenSSL. Install without the `cli` extra and force wheels-only resolution:
+Some transitive dependencies may resolve to versions without a `win_arm64` wheel, which then fail to build because they need a Rust toolchain plus OpenSSL. Force wheels-only resolution:
 
 ```powershell
 git clone https://github.com/Aanerud/outlook-desktop-mcp.git
@@ -279,7 +303,7 @@ python -m pip install --no-deps -e .
 python .venv\Scripts\pywin32_postinstall.py -install
 ```
 
-The base `mcp` package is sufficient for running the stdio server — the `[cli]` extra is only needed for the `mcp` developer CLI tools (`mcp dev`, `mcp inspector`), which aren't used at runtime.
+The package depends on the base `mcp` package only. The `[cli]` extra of `mcp` (which pulls in `cryptography`) is needed just for the `mcp` developer tools (`mcp dev`, `mcp inspector`); install it with `pip install -e ".[cli]"` if you want them.
 
 Register from source the same way as x64:
 
@@ -294,7 +318,7 @@ git clone https://github.com/Aanerud/outlook-desktop-mcp.git
 cd outlook-desktop-mcp
 python3 -m venv .venv
 source .venv/bin/activate
-pip install "mcp[cli]" -e .
+pip install -e .
 ```
 
 Register from source:
@@ -316,9 +340,10 @@ Once registered, just talk to Claude naturally:
 - *"Create a task to review the quarterly report, due Friday, high importance"*
 - *"Mark that email as read and move it to archive"*
 
+- *"What categories do I have? Set this email to 'Follow-up'"*
+
 Windows-only examples:
 
-- *"What categories do I have? Set this email to 'Follow-up'"*
 - *"List my mail rules"*
 - *"Am I set as Out of Office?"*
 
@@ -340,8 +365,8 @@ Windows-only examples:
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
     entrypoint.py            # Platform detection → routes to correct server
-    server.py                # Windows MCP server (29 tools, COM automation)
-    server_mac.py            # macOS MCP server (22 tools, AppleScript)
+    server.py                # Windows MCP server (34 tools, COM automation)
+    server_mac.py            # macOS MCP server (34 tools, AppleScript)
     com_bridge.py            # Async-to-COM threading bridge (Windows)
     applescript_bridge.py    # Async osascript execution (macOS)
     tools/
@@ -349,14 +374,17 @@ outlook-desktop-mcp/
     utils/
       formatting.py          # Email/event/task data extraction (Windows)
       errors.py              # COM error formatting (Windows)
-      applescript_helpers.py # AppleScript escaping, date formatting (macOS)
+      com_dates.py           # Date parsing and task reminders (Windows)
+      applescript_helpers.py # AppleScript escaping, date building (macOS)
   tests/
-    phase1_com_test.py       # Email COM validation
-    phase3_mcp_test.py       # Email MCP test
-    calendar_com_test.py     # Calendar COM validation
-    calendar_mcp_test.py     # Calendar MCP test
-    extras_com_test.py       # Tasks/attachments/categories/rules/OOF COM test
-    extras_mcp_test.py       # Tasks/attachments/categories/rules/OOF MCP test
+    test_*.py                # Unit tests (pytest) — no Outlook needed, run in CI
+    integration/             # Scripts that drive a live Windows Outlook
+      phase1_com_test.py     # Email COM validation
+      phase3_mcp_test.py     # Email MCP test
+      calendar_com_test.py   # Calendar COM validation
+      calendar_mcp_test.py   # Calendar MCP test
+      extras_com_test.py     # Tasks/attachments/categories/rules/OOF COM test
+      extras_mcp_test.py     # Tasks/attachments/categories/rules/OOF MCP test
   outlook-desktop-mcp.cmd   # Windows launcher script
   pyproject.toml
 ```
