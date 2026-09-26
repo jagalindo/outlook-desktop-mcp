@@ -1657,6 +1657,7 @@ async def update_event(
     end: str = "",
     location: str = "",
     body: str = "",
+    all_day: bool | None = None,
 ) -> str:
     """Update an existing calendar event.
 
@@ -1670,11 +1671,19 @@ async def update_event(
         end: Optional. New end time in ISO 8601 format.
         location: Optional. New location.
         body: Optional. New description/notes.
+        all_day: Optional. Pass false to turn an all-day event into a timed one
+            (supply start and end too), or true to make it all-day. Omit to
+            leave it as it is.
 
     Returns:
         Confirmation with updated event details, or an error.
     """
     set_lines = ""
+    # The all-day flag is written before the times: clearing it on an all-day
+    # event resets its start and end, which would otherwise discard the times
+    # set in the same call.
+    if all_day is not None:
+        set_lines += f'set all day flag of e to {"true" if all_day else "false"}\n'
     if subject:
         set_lines += f'set subject of e to "{escape(subject)}"\n'
     if start:
@@ -1693,10 +1702,11 @@ async def update_event(
     if not set_lines:
         return json.dumps({"error": "No fields to update"})
 
-    script = f'''tell application "Microsoft Outlook"
+    script = f'''{_ISO_PRELUDE}
+tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     {set_lines}
-    return (id of e as text) & "{DELIM}" & (subject of e) & "{DELIM}" & (start time of e as string) & "{DELIM}" & (end time of e as string) & "{DELIM}" & (location of e)
+    return (id of e as text) & "{DELIM}" & (subject of e) & "{DELIM}" & my isoDate(start time of e) & "{DELIM}" & my isoDate(end time of e) & "{DELIM}" & (location of e) & "{DELIM}" & ((all day flag of e) as text)
 end tell'''
 
     try:
@@ -1709,6 +1719,7 @@ end tell'''
             "start": parts[2].strip() if len(parts) > 2 else "",
             "end": parts[3].strip() if len(parts) > 3 else "",
             "location": _clean(parts[4]) if len(parts) > 4 else "",
+            "all_day": parts[5].strip().lower() == "true" if len(parts) > 5 else None,
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
