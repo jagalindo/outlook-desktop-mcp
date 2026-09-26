@@ -25,6 +25,9 @@ dependencies = [
     "mcp[cli]>=1.26.0,<2",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.urls]
 Homepage = "https://github.com/aaanerud/outlook-desktop-mcp"
 Repository = "https://github.com/aaanerud/outlook-desktop-mcp"
@@ -39,3 +42,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/outlook_desktop_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Only the unit tests: tests/integration/ holds scripts that drive a live
+# Outlook and are run by hand (see CONTRIBUTING.md).
+python_files = ["test_*.py"]
+pythonpath = ["src", "."]

@@ -11,7 +11,7 @@ import asyncio
 import logging
 
 # Ensure our package is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
@@ -24,12 +24,12 @@ async def run_tests():
     from mcp.client.stdio import stdio_client, StdioServerParameters
     from mcp.client.session import ClientSession
 
-    python_exe = r"C:\Development_Local\outlook-desktop-mcp\.venv\Scripts\python.exe"
+    python_exe = sys.executable
 
     server_params = StdioServerParameters(
         command=python_exe,
         args=["-m", "outlook_desktop_mcp.server"],
-        cwd=r"C:\Development_Local\outlook-desktop-mcp",
+        cwd=os.path.join(os.path.dirname(__file__), "..", ".."),
     )
 
     log("=" * 60)

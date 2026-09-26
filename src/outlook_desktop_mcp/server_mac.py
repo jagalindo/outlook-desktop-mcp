@@ -1773,13 +1773,11 @@ async def create_meeting(
         JSON with status ("sent" or "created"), entry_id, subject, times, the
         calendar it landed in and the attendees, or an error.
     """
-    if not required_attendees.strip():
+    required_lines = _recipient_lines(required_attendees, "required attendee", "newEvt")
+    if not required_lines:
         raise InvalidArgument("required_attendees must list at least one address")
-
-    attendee_lines = (
-        _recipient_lines(required_attendees, "required attendee", "newEvt")
-        + _recipient_lines(optional_attendees, "optional attendee", "newEvt")
-    )
+    attendee_lines = required_lines + _recipient_lines(
+        optional_attendees, "optional attendee", "newEvt")
     send_line = "send meeting newEvt\n" if send_invites else ""
     script = _new_event_script(
         subject, start, end, calendar_id,
