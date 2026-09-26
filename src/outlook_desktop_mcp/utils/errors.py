@@ -14,5 +14,8 @@ def format_com_error(e: Exception) -> str:
             return f"COM Error (0x{hr & 0xFFFFFFFF:08X}): {msg}"
     except Exception:
         pass
-    _logger.warning("Unexpected non-COM exception: %s: %s", type(e).__name__, e)
-    return "An unexpected error occurred."
+    # Non-COM errors are raised by our own code with messages meant for the
+    # caller (an unknown account, a bad date, a missing attachment), so they
+    # are passed through instead of being replaced by a generic sentence.
+    _logger.warning("Non-COM exception: %s: %s", type(e).__name__, e)
+    return str(e) or type(e).__name__

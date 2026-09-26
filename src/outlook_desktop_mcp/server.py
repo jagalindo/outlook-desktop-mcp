@@ -47,6 +47,10 @@ from outlook_desktop_mcp.utils.formatting import (
     format_task_full,
 )
 from outlook_desktop_mcp.utils.errors import format_com_error
+from outlook_desktop_mcp.utils.com_dates import (
+    parse_date as _parse_date,
+    task_reminder_time as _task_reminder_time,
+)
 
 # --- Logging (all to stderr, stdout is reserved for MCP JSON-RPC) ---
 
@@ -943,9 +947,8 @@ async def search_emails(
 
 # --- Helper: parse ISO date string ---
 
-def _parse_date(date_str: str) -> datetime:
-    """Parse ISO 8601 date string like '2026-02-25 14:00' or '2026-02-25T14:00:00'."""
-    return datetime.fromisoformat(date_str)
+# _parse_date and _task_reminder_time live in utils/com_dates.py so they can
+# be unit-tested without pywin32.
 
 
 # =====================================================================
@@ -1094,16 +1097,17 @@ async def create_event(
     """
     def _create(outlook, namespace, subject, start, end, location, body,
                 all_day, reminder_minutes, account):
-        appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
-        # Move to correct store's calendar if account specified
         if account:
+            # Created in the account's calendar directly. Moving an unsaved
+            # item and then looking it up by its (still empty) EntryID failed.
             store = _require_store(namespace, account)
             cal = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
-            appt.Move(cal)
-            appt = namespace.GetItemFromID(appt.EntryID)
+            appt = cal.Items.Add(OL_APPOINTMENT_ITEM)
+        else:
+            appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = _parse_date(start)
+        appt.End = _parse_date(end)
         if location:
             appt.Location = location
         if body:
@@ -1181,8 +1185,8 @@ async def create_meeting(
                     appt._oleobj_.Invoke(*(64209, 0, 8, 0, acc))
                     break
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = _parse_date(start)
+        appt.End = _parse_date(end)
         appt.MeetingStatus = OL_MEETING
         if location:
             appt.Location = location
@@ -1262,9 +1266,9 @@ async def update_event(
         if subject:
             item.Subject = subject
         if start:
-            item.Start = start
+            item.Start = _parse_date(start)
         if end:
-            item.End = end
+            item.End = _parse_date(end)
         if location:
             item.Location = location
         if body:
@@ -1623,23 +1627,25 @@ async def create_task(
     """
     def _create(outlook, namespace, subject, body, due_date, importance,
                 reminder_minutes, account):
-        task = outlook.CreateItem(OL_TASK_ITEM)
-        # Move to correct store's tasks folder if account specified
         if account:
+            # Created in the account's task folder directly, for the same
+            # reason as create_event.
             store = _require_store(namespace, account)
             tasks_folder = store.GetDefaultFolder(OL_FOLDER_TASKS)
-            task.Move(tasks_folder)
-            task = namespace.GetItemFromID(task.EntryID)
+            task = tasks_folder.Items.Add(OL_TASK_ITEM)
+        else:
+            task = outlook.CreateItem(OL_TASK_ITEM)
         task.Subject = subject
         if body:
             task.Body = body
-        if due_date:
-            task.DueDate = due_date
+        due_dt = _parse_date(due_date) if due_date else None
+        if due_dt is not None:
+            task.DueDate = due_dt
         imp_map = {"low": 0, "normal": 1, "high": 2}
         task.Importance = imp_map.get(importance.lower(), 1)
         if reminder_minutes > 0:
             task.ReminderSet = True
-            task.ReminderMinutesBeforeStart = reminder_minutes
+            task.ReminderTime = _task_reminder_time(due_dt, reminder_minutes)
         else:
             task.ReminderSet = False
         task.Save()
@@ -1712,15 +1718,16 @@ async def update_task(
             item.Body = body
             changed = True
         if due_date:
-            item.DueDate = due_date
+            item.DueDate = _parse_date(due_date)
             changed = True
         if importance:
             item.Importance = imp_map[importance.lower()]
             changed = True
         if reminder_minutes >= 0:
             if reminder_minutes > 0:
+                due = _parse_date(due_date) if due_date else item.DueDate
                 item.ReminderSet = True
-                item.ReminderMinutesBeforeStart = reminder_minutes
+                item.ReminderTime = _task_reminder_time(due, reminder_minutes)
             else:
                 item.ReminderSet = False
             changed = True
